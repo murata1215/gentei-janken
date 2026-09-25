@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>限定ジャンケン 観戦ビューア</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <h1>限定ジャンケン 観戦ビューア</h1>
+  <div id="view-toggle">
+    <button id="btn-public">VIEW: PUBLIC</button>
+    <button id="btn-god">VIEW: GOD</button>
+  </div>
+</header>
+
+<main>
+  <section id="game-selector">
+    <label for="game-select">試合を選択:</label>
+    <select id="game-select"></select>
+  </section>
+
+  <section id="game-summary">
+    <h2>試合サマリ</h2>
+    <pre id="summary-json">（試合を選択してください）</pre>
+  </section>
+
+  <section id="turn-list">
+    <h2>ターン別ログ</h2>
+    <div id="turns"></div>
+  </section>
+</main>
+
+<script>
+let godMode = false;
+let godToken = "";
+
+async function viewerFetch(path) {
+  const headers = {};
+  if (godToken) headers["X-Viewer-God-Token"] = godToken;
+  const res = await fetch(path, { headers });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+async function loadConfig() {
+  const cfg = await viewerFetch("/api/config");
+  document.getElementById("btn-god").disabled = !cfg.god_available;
+}
+
+async function loadGames() {
+  const games = await viewerFetch("/api/games");
+  const select = document.getElementById("game-select");
+  select.innerHTML = "";
+  for (const g of games) {
+    const opt = document.createElement("option");
+    opt.value = g.game_id;
+    opt.textContent = `${g.game_id}（T${g.last_turn}, ${g.completed ? "完走" : "進行中"}）`;
+    select.appendChild(opt);
+  }
+  if (games.length > 0) {
+    select.value = games[0].game_id;
+    await loadGame(games[0].game_id);
+  }
+}
+
+async function loadGame(gameId) {
+  const state = await viewerFetch(`/api/games/${gameId}/state`);
+  document.getElementById("summary-json").textContent = JSON.stringify(state, null, 2);
+
+  const view = godMode ? "god" : "public";
+  const rounds = await viewerFetch(`/api/games/${gameId}/turns?view=${view}`);
+  const turnsDiv = document.getElementById("turns");
+  turnsDiv.innerHTML = "";
+  for (const r of rounds) {
+    const block = document.createElement("details");
+    const summary = document.createElement("summary");
+    summary.textContent = `ターン ${r.turn}（${r.events.length}件）`;
+    block.appendChild(summary);
+    const pre = document.createElement("pre");
+    pre.textContent = JSON.stringify(r.events, null, 2);
+    block.appendChild(pre);
+    turnsDiv.appendChild(block);
+  }
+}
+
+document.getElementById("game-select").addEventListener("change", (e) => loadGame(e.target.value));
+document.getElementById("btn-public").addEventListener("click", () => { godMode = false; loadGames(); });
+document.getElementById("btn-god").addEventListener("click", () => {
+  if (!godToken) godToken = prompt("神視点トークンを入力してください（不要な場合は空欄）") || "";
+  godMode = true;
+  loadGames();
+});
+
+loadConfig().then(loadGames);
+</script>
+</body>
+</html>
