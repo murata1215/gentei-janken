@@ -1,5 +1,34 @@
 # Changelog
 
+## 2026-09-26: サイクル1.6.1: 秘匿情報漏れの緊急修正（reasonへのcard_id混入）
+
+盤面UI化（サイクル1.7）の調査中に、**本番公開中のViewerで秘匿情報が漏れている**ことを発見し、
+他の作業から切り離して単独で即修正・デプロイした。
+
+`MATCH_ACCEPT_REJECTED`/`MATCH_OFFER_REJECTED` の `reason` に `str(ValueError)` が
+そのまま入っており（`engine/matches.py`/`engine/player.py` の `reserve_card()` 等が
+card_id入りのメッセージを送出）、実ログに
+`"reason": "P18 already has card P18_PAPER_1 reserved"` が**42件**存在した。
+card_idから手の種類（PAPER）が読め、§8.2秘匿「手札の中身」「封をした提出中の手」を
+直接侵害していた。`reason` は複数イベント種別で**キーとしては**public許可されているが、
+**値が自由文字列**という、ホワイトリスト方式の穴だった。
+
+- **`viewer/log_parser.py`**: `PUBLIC_REASON_CODES`（定数コード文字列の集合）を新設し、
+  `_sanitize_reason()` で `reason` の値がこの集合に無ければ**キー自体を削除**する
+  （空文字上書きではなくキー欠落。`rules/project.md`「DM本文はキーごと削除」と同じ方式を
+  値単位に拡張）。`_redact_event()` に組み込み。
+- **`tests/test_viewer_secrecy.py`**（新規18件）: 本番実害の実例をそのまま再現して
+  card_idパターンが0件になることを直接ガード。既知コードは通ることも確認。
+- **本番反映**: 修正前は実ログ`dry_run_seed42_20p`で42件漏洩していたことを`git stash`で
+  再現確認 → 修正適用後は同ログで0件 → `systemctl --user restart gentei-viewer.service`で
+  即時反映 → `https://gentei-janken-viewer.devrelay.io/`のpublic viewで実測0件、
+  god viewでは正しく14件見えることを確認。
+- **`scripts/resize_emotions.py`**（新規）: 感情画像42枚（1254×1254、合計55.1MB）を
+  128px版に縮小し`viewer/static/emotions/128/`に生成（合計0.7MB、約78分の1）。
+  公開済みViewerのegress対策。原寸は削除しない。
+
+テスト: 178件PASS（既存160件＋新規18件）。
+
 ## 2026-09-26: サイクル1.6: Viewerのweb公開（systemd + Caddy）
 
 観戦Viewer（FastAPI）をdangou-cardと同じ構成（uso8m常駐systemd + Caddyリバースプロキシ）

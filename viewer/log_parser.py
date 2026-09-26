@@ -58,6 +58,43 @@ PUBLIC_EVENT_DATA_KEYS: dict[str, set[str]] = {
 _PLAYER_EXITED_POST_GAME_KEYS = PUBLIC_EVENT_DATA_KEYS["PLAYER_EXITED"] | {"final_assets"}
 """GAME_END後はfinal_assetsも公開してよい（§8.2「試合終了まで」秘匿の期限が切れる）"""
 
+# `reason` はキーとしては複数イベント種別でpublic許可されているが、値は
+# engine側で自由文字列（str(ValueError)）を入れている箇所があり、そこにcard_id
+# （＝手の種類）やplayer_idの詳細が埋め込まれる（例:
+# "P18 already has card P18_PAPER_1 reserved"）。§8.2「手札の中身」「封をした
+# 提出中の手」の直接侵害になるため、値のホワイトリストで塞ぐ（deny-by-default）。
+# ここに列挙されている「定数コード文字列」のみpublicで許可し、それ以外（動的な
+# 自由文字列）は`reason`キーごと削除する（空文字での上書きではなくキー欠落。
+# rules/project.md「DM本文はキーごと削除」と同じ方式）。
+# 新しいreasonコードをengine側に追加したら、ここにも追記すること
+# （追記漏れは自動的に秘匿側に倒れる＝deny-by-default）。
+PUBLIC_REASON_CODES: set[str] = {
+    "already_has_active_offer",  # engine/game.py: MATCH_OFFER_REJECTED
+    "not_found",                  # engine/game.py: MATCH_ACCEPT_REJECTED（offer未検出）
+    "non_positive_amount",        # engine/game.py: REPAY_REJECTED/TRANSFER_REJECTED
+    "repay_locked",               # engine/game.py: REPAY_REJECTED
+    "invalid_target_or_amount",   # engine/game.py: TRANSFER_REJECTED
+    "insufficient_cash",          # engine/game.py: TRANSFER_REJECTED
+    "cards_remaining",            # engine/exit_rules.py: can_exit
+    "insufficient_stars",         # engine/exit_rules.py: can_exit
+    "cannot_clear_debt",          # engine/exit_rules.py: can_exit
+    "unfulfilled_obligation",     # engine/exit_rules.py: can_exit
+}
+
+
+def _sanitize_reason(data: dict[str, Any]) -> dict[str, Any]:
+    """
+    `reason`キーの値がPUBLIC_REASON_CODESに無い（＝engine側のstr(ValueError)由来の
+    自由文字列である）場合、`reason`キー自体をdataから削除する。
+
+    MATCH_OFFER_REJECTED/MATCH_ACCEPT_REJECTEDのreasonにcard_idが混入する実害
+    （サイクル1.6.1で発見）への対処。値の自由文字列はホワイトリスト不可能な
+    秘匿の穴であり、キーが許可されていても値まで無条件に通してはならない。
+    """
+    if "reason" not in data or data["reason"] in PUBLIC_REASON_CODES:
+        return data
+    return {k: v for k, v in data.items() if k != "reason"}
+
 
 class LogCache:
     """ファイル差分キャッシュ（mtime+sizeベース）"""
@@ -198,6 +235,7 @@ def _redact_event(event: dict[str, Any], view: str, game_ended: bool) -> dict[st
         allowed = PUBLIC_EVENT_DATA_KEYS.get(etype, set())
     data = event.get("data", {})
     redacted_data = {k: v for k, v in data.items() if k in allowed}
+    redacted_data = _sanitize_reason(redacted_data)
     return {**event, "data": redacted_data}
 
 

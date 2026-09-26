@@ -6,6 +6,13 @@
 - [ ] 利息の計上間隔: 10ターンごと（計12回）か、原作寄りの5ターンごと（計24回）か。config: `interest_interval_turns`
 - [ ] 対戦で出した手を公開するか、当事者だけにするか（初期値は当事者だけ）。config: `reveal_hands_publicly`
 - [ ] 各プレイヤーの手札枚数を公開するか（初期値は秘匿）。config: `reveal_hand_count`
+      ※既知の一方向漏れ: `MATCH_RESOLVED`が当事者両名の勝敗と共にpublicである限り、
+      観戦者が全試合分の当事者を集計すれば手札残数を算術的に完全復元できる
+      （実ログ`dry_run_seed42_20p`で`cards_destroyed`と全件一致を確認済み、
+      サイクル1.7調査時点）。§8.2 L276「掲示板の減り方から手が分かる」と同種の、
+      公開情報の組み合わせによる構造的漏れであり、§8.2「対戦の組み合わせと勝敗」の
+      公開を維持する限りAPI側では塞げない。Viewer UIは`.god-only`に隔離する運用で
+      対応するが、これは秘匿の保証ではなく表示上の配慮に留まる
 - [ ] 型Dという名前でよいか
 - [ ] 20人のロスター構成（6社×何モデルか）
 
@@ -33,7 +40,7 @@
 - [x] 実LLM課金トライアルでMATCH_RESOLVED実測確認（$0.0149、6人×20ターンで5件）
 - [x] テスト5ファイル新規63件（game_loop/prompt_builder/response_parser/cot/viewer）
 
-## Viewerのweb公開（サイクル1.6・進行中）
+## Viewerのweb公開（サイクル1.6・完了）
 
 - [x] server.pyにDEFAULT_HOST/DEFAULT_PORT定数を新設（既定値の単一ソース化、9024→9027）
 - [x] `GET /`ルート追加（従来`/watch`のみでトップページが404だった穴を閉じた）
@@ -45,6 +52,14 @@
 - [x] Caddy公開（`gentei-janken-viewer.devrelay.io` → `localhost:9027`）— devrelayプロジェクトへ依頼、reload完了。
       `https://gentei-janken-viewer.devrelay.io/` 200・god view無トークン403を実測確認
 - [x] doc/viewer_operations.md（公開運用の正本）を新規作成
+
+## 秘匿情報漏れの緊急修正（サイクル1.6.1・完了）
+
+- [x] `PUBLIC_REASON_CODES`ホワイトリストで`reason`へのcard_id混入（本番42件漏洩）を修正、本番反映
+- [x] tests/test_viewer_secrecy.py 18件新規（178件PASS）
+- [x] 感情画像42枚を128px化（55.1MB→0.7MB、`scripts/resize_emotions.py`）
+- [ ] engine側の恒久対応: `ValueError`をコード化した例外クラス（`engine/errors.py`等）へ
+      置き換え、`str(e)`がcard_id等を含まない安定コードのみを返すようにする（次サイクル）
 
 ## Step 2以降（次サイクル）
 
