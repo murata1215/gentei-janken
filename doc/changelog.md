@@ -1,5 +1,53 @@
 # Changelog
 
+## 2026-09-26: サイクル1.7: Viewerの盤面UI化（dangou-card相当へ）
+
+サイクル1.6で公開したViewerは98行のJSON羅列スタブだった。dangou-card相当の
+盤面UI（20席グリッド・★・掲示板・対戦の可視化・ターン送り）に作り直した。
+
+- **`viewer/log_parser.py`**: `_fold_events()`を新設。public/godいずれの表示でも
+  イベント列は自己完結していない（`MATCH_ACCEPTED`にchallenger_idが無い等）ため、
+  畳み込みは常にgod完全体のイベント列に対して行い、結果を`_project_seat()`/
+  `_project_offer()`/`_project_turn()`でpublic/godへ投影する構成にした
+  （フロントに秘匿判定ロジックを持たせない）。`PUBLIC_SEAT_KEYS`/`PUBLIC_OFFER_KEYS`/
+  `PUBLIC_TURN_SEAT_KEYS`を新設し、`matches_resolved`/`hand_total`等は意図的に
+  publicの席オブジェクトから除外（§8.2の手札枚数秘匿を守るため。既知の一方向漏れは
+  `doc/issues.md`に記録）。`derivation`オブジェクトで畳み込みの自己検証
+  （★ゼロサム・engine記録値との突き合わせ）をレスポンス自体に埋め込んだ。
+  `load_identities()`でseat_map v1/v2両対応、`board_fingerprint()`でETag用の
+  mtime+sizeフィンガープリントを追加。
+- **`viewer/server.py`**: `GET /api/games/{game_id}/board`を新設
+  （`?view=public|god&from_turn=N`、`If-None-Match`で304対応）。
+  `VIEWER_REVEAL_IDENTITY`環境変数（never/after_game_end既定/always）でプレイヤーの
+  正体を出す条件を制御。既存`/state`/`/turns`は凍結・存続（監査用）。
+- **`viewer/static/index.html`**（98行→900行弱）: 全面書き直し。20席グリッド
+  （★メダリオン・戦績・生死バッジ・対戦中インジケータ）、対戦3列レーン
+  （申込→受諾→開示のパイプライン表示）、残数掲示板（バー+SVGスパークライン）、
+  ★勢力図、トランスポート（◀▶/スライダー/再生/無風スキップ/ドラマ目盛り）、
+  選手詳細モーダル、godトークンのsessionStorage化を実装。円形配置は却下し既存の
+  CSS Grid（`repeat(auto-fit, minmax(300px,1fr))`）を踏襲、密度トグルで
+  `minmax(230px,1fr)`にも切替可能にした。感情アイコンは枠のみ用意（データが
+  常にnullのため描画しない。「平静を捏造しない」方針を踏襲）。
+- **`viewer/static/style.css`**: 529行目以降に追記のみ（先頭529行はdangou-cardと
+  バイト一致のままsha256でテスト固定、`tests/test_viewer_frontend.py`）。
+- **フロントエンドで発見・修正したバグ**: `matches_resolved`/`wins`/`losses`/`draws`が
+  serverのpublic投影から意図的に除外されているため、これらをそのままpanel表示に
+  使うと戦績が常に0のまま更新されなかった。`board.offers`（申込id→当事者・勝敗の
+  索引、§8.2により public でも全件配信）から都度計算する方式に変更して解消
+  （既に公開されている情報の集計であり、隠す意味が無い）。GODモード切替時に
+  ターン位置がリセットされる不具合もPlaywright実機検証で発見し修正。
+- **テスト**: `tests/test_viewer_fold.py`（bots混成の実ゲームをtmp_pathで実行し
+  ★/現金/借金/手札枚数がengine記録値と全件一致することを複数シードで検証。
+  `logs/`がgitignoreでもskipif不要、20人×120ターンが実測約数十msで完走）、
+  `tests/test_viewer_board.py`（public/god投影境界・identity開示ポリシー・ETag・
+  from_turn）、`tests/test_viewer_frontend.py`（HTML内`getElementById`とid属性の
+  突合、外部CDN不使用、静的アセット参照の実在確認、style.css先頭529行のsha256固定）
+  を新規67件追加。全224件PASS。
+- **実機検証**: Playwright（headless Chromium）で実際にレンダリングし、
+  コンソールエラー0件、public/godでの手の開示境界（`🔒封`⇔`✊グー`等）を実測、
+  375px幅でも崩れないことを確認。本番反映後、実URLで5試合ぶんcash/debt/
+  hand_*/card_idパターンが0件であることを再確認。
+
 ## 2026-09-26: サイクル1.6.1: 秘匿情報漏れの緊急修正（reasonへのcard_id混入）
 
 盤面UI化（サイクル1.7）の調査中に、**本番公開中のViewerで秘匿情報が漏れている**ことを発見し、

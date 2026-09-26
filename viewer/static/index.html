@@ -1,56 +1,259 @@
 <!DOCTYPE html>
-<html lang="ja">
+<html lang="ja" data-theme="dark">
 <head>
 <meta charset="UTF-8">
-<title>限定ジャンケン 観戦ビューア</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>嘘八百万 —限定ジャンケン— 観戦ビューア</title>
+<script>
+// FOUC防止: CSS読み込み前にテーマをlocalStorageから復元する
+(function () {
+  try {
+    var t = localStorage.getItem("viewer-theme");
+    if (t === "light" || t === "dark") document.documentElement.setAttribute("data-theme", t);
+  } catch (e) {}
+})();
+</script>
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-<header>
-  <h1>限定ジャンケン 観戦ビューア</h1>
-  <div id="view-toggle">
-    <button id="btn-public">VIEW: PUBLIC</button>
-    <button id="btn-god">VIEW: GOD</button>
+
+<header class="header">
+  <h1>嘘八百万 —限定ジャンケン—</h1>
+  <select id="game-select"></select>
+  <div class="stats" id="header-stats">
+    <span id="turn-info">T—/—</span>
+    <span id="alive-info">場 —人</span>
+    <span id="exit-info">生還 —</span>
+    <span id="star-info">★—/—</span>
   </div>
+  <label><input type="checkbox" id="dense-toggle"> 密</label>
+  <label><input type="checkbox" id="skip-idle-toggle"> 無風を飛ばす</label>
+  <button type="button" id="refresh-btn" class="theme-toggle" title="最新の状態を再取得">🔄</button>
+  <div class="god-controls">
+    <button type="button" id="god-toggle" class="god-toggle">VIEW: PUBLIC 🔒</button>
+    <input id="god-token-input" type="password" autocomplete="off" placeholder="神視点トークン" hidden>
+    <span id="god-status" class="god-status">🌐 公開表示</span>
+  </div>
+  <button type="button" id="theme-toggle" class="theme-toggle" title="テーマ切替">🌙</button>
 </header>
 
-<main>
-  <section id="game-selector">
-    <label for="game-select">試合を選択:</label>
-    <select id="game-select"></select>
-  </section>
+<div id="god-banner" class="god-banner" hidden>🔒 神視点 ON — 秘匿情報を表示中（手札・現金・借金・出した手）</div>
 
-  <section id="game-summary">
-    <h2>試合サマリ</h2>
-    <pre id="summary-json">（試合を選択してください）</pre>
-  </section>
+<div class="transport" id="transport">
+  <button type="button" class="tp-btn" id="tp-first" title="最初へ (Home)">⏮</button>
+  <button type="button" class="tp-btn" id="tp-prev" title="1ターン戻る (←)">◀</button>
+  <button type="button" class="tp-btn tp-play" id="tp-play" title="再生 (Space)">▶</button>
+  <button type="button" class="tp-btn" id="tp-next" title="1ターン進む (→)">▶|</button>
+  <button type="button" class="tp-btn" id="tp-last" title="最後へ (End)">⏭</button>
+  <div class="tp-scrub">
+    <input type="range" class="tp-range" id="tp-range" min="0" max="0" step="1" value="0">
+    <div class="tp-marks" id="tp-marks"></div>
+  </div>
+  <span class="tp-label" id="tp-label">T0 / 0</span>
+  <select class="tp-speed" id="tp-speed">
+    <option value="2000">×0.5</option>
+    <option value="1000">×1</option>
+    <option value="500" selected>×2</option>
+    <option value="250">×4</option>
+    <option value="100">×10</option>
+  </select>
+</div>
 
-  <section id="turn-list">
-    <h2>ターン別ログ</h2>
-    <div id="turns"></div>
-  </section>
-</main>
+<main class="grid" id="player-grid"></main>
+
+<section class="situation" id="situation-area">
+  <div class="situation-header">
+    <span class="situation-title">📊 ターン状況</span>
+    <span class="sit-muted" id="sit-phase-legend">対戦は「申込T → 受諾T+1 → T+1末に開示」の最短2ターン進行（§4.1）</span>
+  </div>
+  <div class="situation-body" id="situation-body">
+    <div class="sit-card sit-card-wide" id="card-matches"><h4>⚔ 対戦</h4><div class="sit-muted">試合を選択してください</div></div>
+    <div class="sit-card" id="card-board"><h4>📋 残数掲示板（§8.1）</h4></div>
+    <div class="sit-card" id="card-stars"><h4>★ 勢力図</h4></div>
+    <div class="sit-card" id="card-finance"><h4>💰 財務（神視点）</h4></div>
+    <div class="sit-card" id="card-exits"><h4>🚪 退出・脱落</h4></div>
+    <div class="sit-card" id="card-raw"><h4>📜 このターンの生ログ</h4></div>
+  </div>
+</section>
+
+<div class="footer" id="footer-log"></div>
+
+<details class="rules" id="rules-section">
+  <summary>📖 ルール概要</summary>
+  <div class="rules-body" id="rules-body">
+    <div class="rules-card">
+      <h4>ゲームの流れ</h4>
+      <p><b id="rule-num-players">20</b>体のAIが<b id="rule-total-turns">120</b>ターンの1対1ジャンケンでカードと★を奪い合う。
+      各ターン、場に残る全員が同時に1アクションを行う。</p>
+    </div>
+    <div class="rules-card">
+      <h4>カードと★（§3）</h4>
+      <ul>
+        <li>手札はグー・チョキ・パー各4枚、計<b id="rule-cards-total">12</b>枚</li>
+        <li>初期★は1人<b id="rule-initial-stars">3</b>個（場全体で固定・新規発行なし）</li>
+        <li>対戦1回で勝敗に関係なく1枚消費。勝つと相手から★1個</li>
+      </ul>
+    </div>
+    <div class="rules-card">
+      <h4>対戦の2ターン進行（§4.1）</h4>
+      <p>申込ターンT → 受諾/拒否ターンT+1 → T+1終わりに同時開示。最短でも2ターンかかる。</p>
+    </div>
+    <div class="rules-card">
+      <h4>借金と利息（§2）</h4>
+      <p>開始前に100万〜1000万円を選択。年利<b id="rule-interest-rate">1.5</b>%複利、
+      <b id="rule-interest-interval">10</b>ターンごとに計上。</p>
+    </div>
+    <div class="rules-card">
+      <h4>生還条件（§1.1/§6.1）</h4>
+      <ul>
+        <li>①手札0枚 ②★<b id="rule-survival-stars">3</b>個以上 ③清算で借金完済</li>
+        <li>3個を超える★は1個<b id="rule-buyback">100万円</b>で買取</li>
+      </ul>
+    </div>
+    <div class="rules-card">
+      <h4>脱落の3種別（§1.2）</h4>
+      <ul>
+        <li>強制退場: ★0で即時</li>
+        <li>契約違反: 検知時点で即時（未実装）</li>
+        <li>時間切れ: 最終ターンに場に残存</li>
+      </ul>
+    </div>
+  </div>
+</details>
+
+<div class="modal-overlay" id="modal-overlay">
+  <div class="modal">
+    <span class="close" id="modal-close">×</span>
+    <h2 id="modal-title"></h2>
+    <div id="modal-body"></div>
+  </div>
+</div>
 
 <script>
+"use strict";
+
+// =============================================================================
+// 定数
+// =============================================================================
+const HAND_GLYPH = { ROCK: "✊", SCISSORS: "✌", PAPER: "🖐" };
+const HAND_JA = { ROCK: "グー", SCISSORS: "チョキ", PAPER: "パー" };
+const EMOTION_EN = { "喜": "joy", "怒": "anger", "哀": "sadness", "楽": "ease", "焦": "panic", "疑": "doubt", "奸": "smirk" };
+const EMOTION_EMOJI = { "喜": "😊", "怒": "😠", "哀": "😢", "楽": "😌", "焦": "😰", "疑": "🤨", "奸": "😏" };
+const MEANINGFUL_EVENT_TYPES = new Set(["MATCH_RESOLVED", "PLAYER_EXITED", "FORCED_EXIT", "TIMEOUT", "INTEREST"]);
+
+// =============================================================================
+// グローバル状態（dangou-cardと同じくトップレベルletの集合。状態管理ライブラリは使わない）
+// =============================================================================
+let currentGame = null;
+let board = null;          // 現在の試合の/api/games/{id}/board レスポンス（god/public）
+let timeline = null;       // buildTimeline(board) の結果 { snaps, maxTurn }
+let curTurn = 0;
+let prevTurn = 0;
+let panelRefs = {};        // pid -> DOM参照
+let playTimer = null;
 let godMode = false;
 let godToken = "";
+let godPublic = false;
 
-async function viewerFetch(path) {
-  const headers = {};
-  if (godToken) headers["X-Viewer-God-Token"] = godToken;
-  const res = await fetch(path, { headers });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return res.json();
+// =============================================================================
+// ユーティリティ
+// =============================================================================
+function escapeHtml(s) {
+  const div = document.createElement("div");
+  div.textContent = s == null ? "" : String(s);
+  return div.innerHTML;
+}
+function safeStr(v) {
+  if (typeof v === "string") return v;
+  if (typeof v === "number" && Number.isFinite(v)) return String(v);
+  return "";
+}
+function yen(n) {
+  if (typeof n !== "number") return "?";
+  return "¥" + n.toLocaleString("ja-JP");
+}
+function setText(el, v) {
+  const s = String(v);
+  if (el.textContent !== s) el.textContent = s;
+}
+function setClass(el, cls, on) {
+  el.classList.toggle(cls, !!on);
 }
 
-async function loadConfig() {
-  const cfg = await viewerFetch("/api/config");
-  document.getElementById("btn-god").disabled = !cfg.god_available;
+// =============================================================================
+// GOD token（sessionStorageのみ。DOM/URL/consoleに残さない）
+// =============================================================================
+const GOD_TOKEN_KEY = "viewer-god-token";
+function loadStoredGodToken() {
+  try { return sessionStorage.getItem(GOD_TOKEN_KEY) || ""; } catch (e) { return ""; }
+}
+function storeGodToken(token) {
+  try {
+    if (token) sessionStorage.setItem(GOD_TOKEN_KEY, token);
+    else sessionStorage.removeItem(GOD_TOKEN_KEY);
+  } catch (e) {}
 }
 
+async function viewerFetch(path, opts) {
+  opts = opts || {};
+  const headers = Object.assign({}, opts.headers || {});
+  if (godMode && godToken) headers["X-Viewer-God-Token"] = godToken;
+  const res = await fetch(path, Object.assign({}, opts, { headers }));
+  if (res.status === 403 && godMode) {
+    forceGodLogout();
+    throw new Error("God view unauthorized");
+  }
+  if (!res.ok && res.status !== 304) throw new Error("HTTP " + res.status);
+  return res;
+}
+
+function forceGodLogout() {
+  godMode = false;
+  storeGodToken("");
+  godToken = "";
+  updateGodControls();
+}
+
+function updateGodControls() {
+  const btn = document.getElementById("god-toggle");
+  const status = document.getElementById("god-status");
+  const banner = document.getElementById("god-banner");
+  btn.textContent = godMode ? "VIEW: GOD 🔓" : "VIEW: PUBLIC 🔒";
+  status.textContent = godMode ? "🔒 神視点表示中" : "🌐 公開表示";
+  banner.hidden = !godMode;
+}
+
+async function loadViewerConfig() {
+  try {
+    const res = await fetch("/api/config");
+    const cfg = await res.json();
+    godPublic = !!cfg.god_public;
+    document.getElementById("god-toggle").disabled = !cfg.god_available;
+  } catch (e) {
+    godPublic = false;
+  }
+}
+
+// =============================================================================
+// テーマ
+// =============================================================================
+function applyTheme(theme) {
+  document.documentElement.setAttribute("data-theme", theme);
+  try { localStorage.setItem("viewer-theme", theme); } catch (e) {}
+}
+document.getElementById("theme-toggle").addEventListener("click", () => {
+  const cur = document.documentElement.getAttribute("data-theme") === "light" ? "dark" : "light";
+  applyTheme(cur);
+});
+
+// =============================================================================
+// 試合一覧・盤面データの取得
+// =============================================================================
 async function loadGames() {
-  const games = await viewerFetch("/api/games");
+  const res = await fetch("/api/games");
+  const games = await res.json();
   const select = document.getElementById("game-select");
+  const prevValue = select.value;
   select.innerHTML = "";
   for (const g of games) {
     const opt = document.createElement("option");
@@ -58,41 +261,633 @@ async function loadGames() {
     opt.textContent = `${g.game_id}（T${g.last_turn}, ${g.completed ? "完走" : "進行中"}）`;
     select.appendChild(opt);
   }
-  if (games.length > 0) {
-    select.value = games[0].game_id;
-    await loadGame(games[0].game_id);
-  }
+  if (games.length === 0) return;
+  select.value = games.some(g => g.game_id === prevValue) ? prevValue : games[0].game_id;
+  await loadGame(select.value);
 }
 
 async function loadGame(gameId) {
-  const state = await viewerFetch(`/api/games/${gameId}/state`);
-  document.getElementById("summary-json").textContent = JSON.stringify(state, null, 2);
-
+  currentGame = gameId;
   const view = godMode ? "god" : "public";
-  const rounds = await viewerFetch(`/api/games/${gameId}/turns?view=${view}`);
-  const turnsDiv = document.getElementById("turns");
-  turnsDiv.innerHTML = "";
-  for (const r of rounds) {
-    const block = document.createElement("details");
-    const summary = document.createElement("summary");
-    summary.textContent = `ターン ${r.turn}（${r.events.length}件）`;
-    block.appendChild(summary);
-    const pre = document.createElement("pre");
-    pre.textContent = JSON.stringify(r.events, null, 2);
-    block.appendChild(pre);
-    turnsDiv.appendChild(block);
+  const res = await viewerFetch(`/api/games/${encodeURIComponent(gameId)}/board?view=${view}&from_turn=0`);
+  board = await res.json();
+  if (!board.found) {
+    document.getElementById("player-grid").innerHTML = "<p class='sit-muted'>試合データがありません</p>";
+    return;
+  }
+  timeline = buildTimeline(board);
+  fillRules(board.rules);
+  mountPanels(board.seats.map(s => s.player_id));
+  const range = document.getElementById("tp-range");
+  range.max = timeline.maxTurn;
+  buildMarks(timeline);
+  setTurn(timeline.maxTurn, { animate: false });
+}
+
+function fillRules(rules) {
+  if (!rules) return;
+  document.getElementById("rule-num-players").textContent = rules.num_players;
+  document.getElementById("rule-total-turns").textContent = rules.total_turns;
+  document.getElementById("rule-cards-total").textContent = rules.initial_cards_total;
+  document.getElementById("rule-initial-stars").textContent = rules.initial_stars;
+  document.getElementById("rule-interest-rate").textContent = (rules.interest_rate * 100).toFixed(1);
+  document.getElementById("rule-interest-interval").textContent = rules.interest_interval_turns;
+  document.getElementById("rule-survival-stars").textContent = rules.survival_stars_min;
+  document.getElementById("rule-buyback").textContent = (rules.surplus_star_buyback / 10000).toFixed(0) + "万円";
+}
+
+// =============================================================================
+// タイムライン構築（サーバのturns[].seats_changedを前から辞書マージするだけ。
+// 状態機械はサーバ側で完結しており、ここは純粋なマージ処理のみ）
+// =============================================================================
+function buildTimeline(b) {
+  const rules = b.rules;
+  const perType = Math.floor((rules.initial_cards_total || 12) / 3);
+  const state = {};
+  for (const s of b.seats) {
+    state[s.player_id] = {
+      player_id: s.player_id, seat_index: s.seat_index, initial_loan: s.initial_loan,
+      stars: rules.initial_stars, status: "alive", exited_turn: null, elimination_type: null,
+      final_assets: null, cash: s.initial_loan, debt: s.initial_loan,
+      hand_total: rules.initial_cards_total,
+      hand_counts: { ROCK: perType, SCISSORS: perType, PAPER: perType },
+      reserved_count: 0, wins: 0, losses: 0, draws: 0, matches_resolved: 0,
+    };
+  }
+  const snaps = [{ turn: 0, board: b.board_history[0] || { ROCK: 0, SCISSORS: 0, PAPER: 0 },
+                   alive_count: b.seats.length, seats: cloneSeats(state), delta: null }];
+  let maxTurn = 0;
+  for (const t of b.turns) {
+    for (const pid in t.seats_changed) {
+      if (state[pid]) Object.assign(state[pid], t.seats_changed[pid]);
+    }
+    maxTurn = t.turn;
+    snaps.push({
+      turn: t.turn, board: t.board, alive_count: t.alive_count,
+      seats: cloneSeats(state), delta: t.delta, seats_changed: t.seats_changed,
+    });
+  }
+  return { snaps, maxTurn };
+}
+function cloneSeats(state) {
+  const out = {};
+  for (const pid in state) out[pid] = Object.assign({}, state[pid], { hand_counts: Object.assign({}, state[pid].hand_counts) });
+  return out;
+}
+function snapAt(turn) {
+  if (!timeline) return null;
+  // snapsはturn昇順・turn0始まりの連番なのでインデックス直参照でよい
+  return timeline.snaps[Math.max(0, Math.min(turn, timeline.maxTurn))] || timeline.snaps[timeline.snaps.length - 1];
+}
+
+// =============================================================================
+// ドラマ目盛り
+// =============================================================================
+function buildMarks(tl) {
+  const container = document.getElementById("tp-marks");
+  container.innerHTML = "";
+  if (tl.maxTurn === 0) return;
+  for (const snap of tl.snaps) {
+    if (!snap.delta) continue;
+    let kind = null;
+    if (snap.delta.eliminated && snap.delta.eliminated.length) kind = "elim";
+    else if (snap.delta.exited && snap.delta.exited.length) kind = "exit";
+    else if (snap.delta.resolved && snap.delta.resolved.length) kind = "resolve";
+    else if (Object.values(snap.seats_changed || {}).some(c => "debt" in c)) kind = "interest";
+    if (!kind) continue;
+    const mark = document.createElement("div");
+    mark.className = "tp-mark mark-" + kind;
+    mark.style.left = (snap.turn / tl.maxTurn * 100) + "%";
+    mark.title = `T${snap.turn}`;
+    mark.addEventListener("click", () => setTurn(snap.turn, { animate: false }));
+    container.appendChild(mark);
   }
 }
 
-document.getElementById("game-select").addEventListener("change", (e) => loadGame(e.target.value));
-document.getElementById("btn-public").addEventListener("click", () => { godMode = false; loadGames(); });
-document.getElementById("btn-god").addEventListener("click", () => {
-  if (!godToken) godToken = prompt("神視点トークンを入力してください（不要な場合は空欄）") || "";
-  godMode = true;
-  loadGames();
+// =============================================================================
+// プレイヤーパネル
+// =============================================================================
+function mountPanels(pids) {
+  const grid = document.getElementById("player-grid");
+  grid.innerHTML = "";
+  panelRefs = {};
+  for (const pid of pids) {
+    const el = document.createElement("div");
+    el.className = "panel";
+    el.dataset.pid = pid;
+    el.innerHTML = `
+      <div class="panel-top">
+        <div class="star-big safe" title="★">
+          <span class="star-count">3</span>
+          <span class="star-pips">★★★</span>
+        </div>
+        <div class="panel-id">
+          <div class="model-large">${escapeHtml(pid)}</div>
+          <div class="panel-sub">
+            <span class="pid">${escapeHtml(pid)}</span>
+            <span class="seat"></span>
+            <span class="badge alive">生存</span>
+            <span class="emotion-badge"></span>
+          </div>
+          <div class="net-asset">—</div>
+          <div class="finance-detail"></div>
+          <div class="finance-detail god-only" hidden></div>
+        </div>
+      </div>
+      <div class="match-slot sit-muted">—</div>
+      <div class="last-event sit-muted">—</div>
+      <div class="stats-row">
+        <span class="stats-left"></span>
+        <span class="stats-cost"></span>
+      </div>
+    `;
+    el.addEventListener("click", () => openPlayerDetail(pid));
+    el.addEventListener("mouseenter", () => highlightPair(pid));
+    el.addEventListener("mouseleave", () => clearHighlight());
+    grid.appendChild(el);
+    panelRefs[pid] = {
+      root: el,
+      starBox: el.querySelector(".star-big"),
+      starCount: el.querySelector(".star-count"),
+      starPips: el.querySelector(".star-pips"),
+      modelLarge: el.querySelector(".model-large"),
+      seat: el.querySelector(".seat"),
+      badge: el.querySelector(".badge"),
+      netAsset: el.querySelector(".net-asset"),
+      finPublic: el.querySelector(".finance-detail:not(.god-only)"),
+      finGod: el.querySelector(".finance-detail.god-only"),
+      matchSlot: el.querySelector(".match-slot"),
+      lastEvent: el.querySelector(".last-event"),
+      statsLeft: el.querySelector(".stats-left"),
+    };
+  }
+  // identityが公開されていれば、モデル名を表示に反映する（1回だけでよい）
+  for (const s of board.seats) {
+    const identity = s.identity;
+    if (identity && panelRefs[s.player_id]) {
+      panelRefs[s.player_id].modelLarge.textContent = identity.name || identity.model_id || s.player_id;
+    }
+    if (panelRefs[s.player_id]) panelRefs[s.player_id].seat.textContent = "席" + s.seat_index;
+  }
+}
+
+function starPips(n) {
+  if (n <= 0) return "";
+  if (n <= 5) return "★".repeat(n);
+  return "★★★★★+" + (n - 5);
+}
+function starClass(n) {
+  if (n <= 0) return "dead";
+  if (n === 1) return "danger";
+  if (n === 2) return "warn";
+  return "safe";
+}
+
+function updatePanel(pid, seat, prevSeat, animate) {
+  const r = panelRefs[pid];
+  if (!r) return;
+  setText(r.starCount, seat.stars);
+  r.starPips.textContent = starPips(seat.stars);
+  r.starBox.className = "star-big " + starClass(seat.stars);
+  if (animate && prevSeat) {
+    if (seat.stars > prevSeat.stars) flashStar(r, "gain");
+    else if (seat.stars < prevSeat.stars) flashStar(r, "loss");
+  }
+
+  const badgeText = seat.status === "eliminated" ? `T${seat.exited_turn}脱落（${elimLabel(seat.elimination_type)}）`
+    : seat.status === "exited" ? `T${seat.exited_turn}生還`
+    : hasActiveOffer(pid, board.offers, curTurn) ? "受諾待ち" : "生存";
+  const badgeClass = seat.status === "eliminated" ? "eliminated" : seat.status === "exited" ? "exited" : "alive";
+  setText(r.badge, badgeText);
+  r.badge.className = "badge " + badgeClass;
+  setClass(r.root, "eliminated", seat.status !== "alive");
+  setClass(r.root, "exited", seat.status === "exited");
+
+  // 勝敗集計はseat.matches_resolved等（god専用・手札枚数の逆算防止のためpublicでは
+  // 配信されない）ではなく、board.offers（申込id→当事者・勝敗の索引。§8.2の
+  // 「対戦の組み合わせと勝敗」としてpublicでも全件配信される）から都度計算する。
+  // 既に公開されている情報の集計であり、隠す意味が無い（doc/issues.md参照）。
+  const rec = recordFor(pid, curTurn);
+  const recordText = rec.matches > 0 ? `${rec.wins}勝${rec.losses}敗${rec.draws}分` : "対戦なし";
+  setText(r.netAsset, recordText);
+  setText(r.finPublic, `借入${yen(seat.initial_loan)} ／ 対戦${rec.matches}回`);
+
+  if (godMode) {
+    r.finGod.hidden = false;
+    const hands = seat.hand_counts || {};
+    const chips = ["ROCK", "SCISSORS", "PAPER"].map(h => `<span class="card-chip">${HAND_GLYPH[h]}${hands[h] ?? "?"}</span>`).join("");
+    r.finGod.innerHTML = `現金${yen(seat.cash)} ／ 借金 <span class="debt-val">${yen(seat.debt)}</span> ／ 残 ${chips}`;
+  } else {
+    r.finGod.hidden = true;
+    r.finGod.innerHTML = "";
+  }
+
+  const active = activeOfferFor(pid, board.offers, curTurn);
+  if (active) {
+    const isChallenger = active.challenger_id === pid;
+    const other = isChallenger ? active.opponent_id : active.challenger_id;
+    const dir = isChallenger ? "→" : "←";
+    setText(r.matchSlot, `${dir} ${other} と対戦中（申込T${active.offered_turn}）`);
+  } else {
+    setText(r.matchSlot, "—");
+  }
+
+  const snap = snapAt(curTurn);
+  const lastEvent = snap && snap.delta ? describeLastEventFor(pid, snap.delta) : null;
+  setText(r.lastEvent, lastEvent || "—");
+
+  r.statsLeft.innerHTML = `<span>申込${countOffersBy(board.offers, pid, "challenger_id", curTurn)}</span>` +
+    `<span>成立${rec.matches}</span>`;
+}
+
+function recordFor(pid, turn) {
+  let wins = 0, losses = 0, draws = 0;
+  for (const oid in board.offers) {
+    const o = board.offers[oid];
+    if (o.status !== "resolved" || o.resolved_turn > turn) continue;
+    const isChallenger = o.challenger_id === pid;
+    const isOpponent = o.opponent_id === pid;
+    if (!isChallenger && !isOpponent) continue;
+    if (o.outcome === "draw") draws++;
+    else if ((o.outcome === "challenger_win") === isChallenger) wins++;
+    else losses++;
+  }
+  return { wins, losses, draws, matches: wins + losses + draws };
+}
+
+function elimLabel(t) {
+  return t === "FORCED_EXIT" ? "強制退場" : t === "TIMEOUT" ? "時間切れ" : t === "CONTRACT_VIOLATION" ? "契約違反" : (t || "不明");
+}
+function hasActiveOffer(pid, offers, turn) {
+  return !!activeOfferFor(pid, offers, turn);
+}
+function activeOfferFor(pid, offers, turn) {
+  for (const oid in offers) {
+    const o = offers[oid];
+    if (o.challenger_id !== pid && o.opponent_id !== pid) continue;
+    if (o.offered_turn > turn) continue;
+    if (o.status === "pending" || o.status === "accepted") {
+      if (o.closed_turn == null || o.closed_turn > turn) return o;
+    }
+  }
+  return null;
+}
+function countOffersBy(offers, pid, key, turn) {
+  let n = 0;
+  for (const oid in offers) {
+    const o = offers[oid];
+    if (o[key] === pid && o.offered_turn <= turn) n++;
+  }
+  return n;
+}
+function describeLastEventFor(pid, delta) {
+  for (const r of delta.resolved || []) {
+    if (r.challenger_id === pid || r.opponent_id === pid) {
+      const won = (r.outcome === "challenger_win" && r.challenger_id === pid) ||
+                  (r.outcome === "opponent_win" && r.opponent_id === pid);
+      const draw = r.outcome === "draw";
+      const other = r.challenger_id === pid ? r.opponent_id : r.challenger_id;
+      return draw ? `🤝 T${curTurn} ${other}とあいこ` : won ? `💥 T${curTurn} ${other}に勝ち ★+1` : `💢 T${curTurn} ${other}に負け ★-1`;
+    }
+  }
+  for (const r of (delta.eliminated || [])) {
+    if (r.player_id === pid) return `☠ T${curTurn} ${elimLabel(r.elimination_type)}`;
+  }
+  for (const r of (delta.exited || [])) {
+    if (r.player_id === pid) return `🎉 T${curTurn} 生還`;
+  }
+  return null;
+}
+
+function flashStar(r, kind) {
+  r.starBox.classList.remove("star-gain", "star-loss");
+  void r.starBox.offsetWidth; // reflow でアニメーションを再トリガ
+  r.starBox.classList.add(kind === "gain" ? "star-gain" : "star-loss");
+  const delta = document.createElement("span");
+  delta.className = "star-delta";
+  delta.textContent = kind === "gain" ? "+1" : "-1";
+  r.starBox.appendChild(delta);
+  setTimeout(() => delta.remove(), 900);
+}
+
+function highlightPair(pid) {
+  const active = activeOfferFor(pid, board.offers, curTurn);
+  clearHighlight();
+  if (panelRefs[pid]) panelRefs[pid].root.classList.add("focus");
+  if (active) {
+    const other = active.challenger_id === pid ? active.opponent_id : active.challenger_id;
+    if (panelRefs[other]) panelRefs[other].root.classList.add("linked");
+  }
+}
+function clearHighlight() {
+  for (const pid in panelRefs) panelRefs[pid].root.classList.remove("focus", "linked");
+}
+
+// =============================================================================
+// ターン制御
+// =============================================================================
+function setTurn(t, opts) {
+  opts = opts || {};
+  t = Math.max(0, Math.min(t, timeline.maxTurn));
+  prevTurn = curTurn;
+  const animate = opts.animate !== false && t === prevTurn + 1;
+  curTurn = t;
+  renderTurn(animate);
+}
+
+function renderTurn(animate) {
+  const snap = snapAt(curTurn);
+  const prevSnap = animate ? snapAt(prevTurn) : null;
+  for (const pid in snap.seats) {
+    updatePanel(pid, snap.seats[pid], prevSnap ? prevSnap.seats[pid] : null, animate);
+  }
+  document.getElementById("tp-range").value = curTurn;
+  setText(document.getElementById("tp-label"), `T${curTurn} / ${timeline.maxTurn}`);
+  setText(document.getElementById("turn-info"), `T${curTurn}/${board.rules.total_turns}`);
+  setText(document.getElementById("alive-info"), `場 ${snap.alive_count}人`);
+  const survived = Object.values(snap.seats).filter(s => s.status === "exited").length;
+  setText(document.getElementById("exit-info"), `生還 ${survived}`);
+  const starsInPlay = Object.values(snap.seats).filter(s => s.status === "alive").reduce((a, s) => a + s.stars, 0);
+  setText(document.getElementById("star-info"), `★${starsInPlay}/${board.derivation.stars_total}` +
+    (board.derivation.stars_zero_sum_ok ? "" : "（整合エラー）"));
+
+  renderBoard(snap.board);
+  renderMatchLane(snap);
+  renderStars(snap);
+  renderFinance(snap);
+  renderExits(snap);
+  renderRawLog(snap);
+}
+
+function renderBoard(b) {
+  const el = document.getElementById("card-board");
+  if (!b) { el.innerHTML = "<h4>📋 残数掲示板（§8.1）</h4><p class='sit-muted'>データなし</p>"; return; }
+  const total = b.ROCK + b.SCISSORS + b.PAPER;
+  const denom = Math.max(1, ...["ROCK", "SCISSORS", "PAPER"].map(k => b[k]));
+  const rows = ["ROCK", "SCISSORS", "PAPER"].map(k => `
+    <div class="board-row">
+      <span class="board-label">${HAND_GLYPH[k]} ${HAND_JA[k]}</span>
+      <span class="board-bar"><span class="board-fill hand-${k.toLowerCase()}" style="width:${(b[k] / denom * 100).toFixed(1)}%"></span></span>
+      <span class="board-num">${b[k]}</span>
+    </div>`).join("");
+  el.innerHTML = `<h4>📋 残数掲示板（§8.1）</h4>${rows}<div class="board-total sit-row">合計 <b>${total}</b> 枚</div>` +
+    renderSparkline();
+}
+
+function renderSparkline() {
+  if (!board.board_history || board.board_history.length < 2) return "";
+  const maxVal = Math.max(1, ...board.board_history.flatMap(h => [h.ROCK, h.SCISSORS, h.PAPER]));
+  const n = board.board_history.length;
+  const toPoints = (key) => board.board_history.map((h, i) =>
+    `${(i / (n - 1) * 240).toFixed(1)},${(60 - h[key] / maxVal * 58).toFixed(1)}`).join(" ");
+  const cursorX = (Math.min(curTurn, board.board_history[n - 1].turn) / Math.max(1, board.board_history[n - 1].turn) * 240).toFixed(1);
+  return `<svg class="board-spark" viewBox="0 0 240 60" preserveAspectRatio="none" aria-hidden="true">
+    <polyline class="spark-rock" points="${toPoints("ROCK")}"/>
+    <polyline class="spark-scissors" points="${toPoints("SCISSORS")}"/>
+    <polyline class="spark-paper" points="${toPoints("PAPER")}"/>
+    <line class="spark-cursor" x1="${cursorX}" y1="0" x2="${cursorX}" y2="60"/>
+  </svg>`;
+}
+
+function renderMatchLane(snap) {
+  const el = document.getElementById("card-matches");
+  const delta = snap.delta;
+  if (!delta) { el.innerHTML = "<h4>⚔ 対戦</h4><p class='sit-muted'>ゲーム開始</p>"; return; }
+  const offeredRows = delta.offered.map(oid => {
+    const o = board.offers[oid];
+    return `<div class="match-row pending"><span class="match-side challenger"><b>${o.challenger_id}</b></span>
+      <span class="vs">→</span><span class="match-side opponent"><b>${o.opponent_id}</b></span>
+      <span class="match-outcome sit-muted">返答待ち（T${o.offered_turn + 1}まで）</span></div>`;
+  }).join("") || "<div class='sit-muted'>なし</div>";
+
+  const midRows = [
+    ...delta.accepted.map(oid => {
+      const o = board.offers[oid];
+      return `<div class="match-row accepted"><span class="match-side challenger"><b>${o.challenger_id}</b></span>
+        <span class="vs">×</span><span class="match-side opponent"><b>${o.opponent_id}</b></span>
+        <span class="match-outcome sit-muted">このターン末に開示</span></div>`;
+    }),
+    ...delta.declined.map(oid => matchClosedRow(oid, "拒否")),
+    ...delta.withdrawn.map(oid => matchClosedRow(oid, "取り下げ")),
+    ...delta.expired.map(oid => matchClosedRow(oid, "失効")),
+  ].join("") || "<div class='sit-muted'>なし</div>";
+
+  const resolvedRows = (delta.resolved || []).map(r => {
+    const cHand = godMode ? `<span class="hand hand-${(r.challenger_hand || "").toLowerCase()}">${HAND_GLYPH[r.challenger_hand] || ""}${HAND_JA[r.challenger_hand] || ""}</span>` : `<span class="hand hand-hidden" title="出した手は当事者のみ（§8.2）">🔒封</span>`;
+    const oHand = godMode ? `<span class="hand hand-${(r.opponent_hand || "").toLowerCase()}">${HAND_GLYPH[r.opponent_hand] || ""}${HAND_JA[r.opponent_hand] || ""}</span>` : `<span class="hand hand-hidden" title="出した手は当事者のみ（§8.2）">🔒封</span>`;
+    const outcome = r.outcome === "draw" ? `<span class="match-outcome sit-muted">あいこ</span>` :
+      r.outcome === "challenger_win" ? `<span class="match-outcome sit-win">${r.challenger_id} の勝ち ★+1</span>` :
+      `<span class="match-outcome sit-win">${r.opponent_id} の勝ち ★+1</span>`;
+    return `<div class="match-row resolved"><span class="match-side challenger"><b>${r.challenger_id}</b>${cHand}</span>
+      <span class="vs">VS</span><span class="match-side opponent"><b>${r.opponent_id}</b>${oHand}</span>${outcome}</div>`;
+  }).join("") || "<div class='sit-muted'>なし</div>";
+
+  el.innerHTML = `<h4>⚔ 対戦（T${snap.turn}）</h4>
+    <div class="match-lane">
+      <div class="match-col"><div class="ct-label">① 申込</div>${offeredRows}</div>
+      <div class="match-col"><div class="ct-label">② 受諾/拒否</div>${midRows}</div>
+      <div class="match-col"><div class="ct-label">③ 開示</div>${resolvedRows}</div>
+    </div>`;
+}
+function matchClosedRow(oid, label) {
+  const o = board.offers[oid];
+  if (!o) return "";
+  return `<div class="match-row declined"><span class="match-side challenger"><b>${o.challenger_id}</b></span>
+    <span class="vs">→</span><span class="match-side opponent"><b>${o.opponent_id}</b></span>
+    <span class="match-outcome sit-elim">${label}</span></div>`;
+}
+
+function renderStars(snap) {
+  const el = document.getElementById("card-stars");
+  const seats = Object.values(snap.seats).slice().sort((a, b) => b.stars - a.stars);
+  const rows = seats.slice(0, 10).map(s => `<div class="sit-row">
+    <b>${s.player_id}</b> ${starPips(s.stars) || "—"} (${s.stars})
+    ${s.status !== "alive" ? `<span class="sit-elim">${s.status === "exited" ? "生還" : "脱落"}</span>` : ""}
+  </div>`).join("");
+  const d = board.derivation;
+  el.innerHTML = `<h4>★ 勢力図</h4>${rows}
+    <div class="board-total sit-row">場の★合計 <b>${d.stars_total}</b> ／
+    ${d.stars_zero_sum_ok ? "<span class='sit-ok'>整合 ✅</span>" : "<span class='sit-debt'>⚠ 整合エラー</span>"}</div>`;
+}
+
+function renderFinance(snap) {
+  const el = document.getElementById("card-finance");
+  if (!godMode) {
+    el.innerHTML = "<h4>💰 財務（神視点）</h4><p class='sit-muted'>神視点トークンを入力すると現金・借金が表示されます</p>";
+    return;
+  }
+  const rows = Object.values(snap.seats)
+    .filter(s => s.status === "alive")
+    .sort((a, b) => (b.cash - b.debt) - (a.cash - a.debt))
+    .slice(0, 10)
+    .map(s => `<div class="sit-row"><b>${s.player_id}</b> 現金${yen(s.cash)} ／ 借金 <span class="debt-val">${yen(s.debt)}</span></div>`)
+    .join("") || "<div class='sit-muted'>生存者なし</div>";
+  el.innerHTML = `<h4>💰 財務（神視点）</h4>${rows}`;
+}
+
+function renderExits(snap) {
+  const el = document.getElementById("card-exits");
+  const delta = snap.delta;
+  const rows = [
+    ...((delta ? delta.exited : []) || []).map(r => `<div class="sit-row sit-ok">🎉 ${r.player_id} が生還${r.final_assets != null ? `（${yen(r.final_assets)}）` : ""}</div>`),
+    ...((delta ? delta.eliminated : []) || []).map(r => `<div class="sit-row sit-elim">☠ ${r.player_id} が${elimLabel(r.elimination_type)}</div>`),
+  ].join("");
+  el.innerHTML = `<h4>🚪 退出・脱落</h4>${rows || "<div class='sit-muted'>このターンは無し</div>"}`;
+}
+
+function renderRawLog(snap) {
+  const el = document.getElementById("card-raw");
+  const delta = snap.delta;
+  if (!delta) { el.innerHTML = "<h4>📜 このターンの生ログ</h4><p class='sit-muted'>—</p>"; return; }
+  const rejections = (delta.rejections || []).map(r =>
+    `<div class="sit-row sit-muted">✗ ${r.player_id}: ${r.event_type}${r.reason ? "（" + escapeHtml(r.reason) + "）" : ""}</div>`
+  ).join("");
+  el.innerHTML = `<h4>📜 このターンの生ログ</h4>${rejections || "<div class='sit-muted'>却下イベントなし</div>"}`;
+}
+
+// =============================================================================
+// トランスポート操作
+// =============================================================================
+function stepTurn(delta) {
+  stopPlay();
+  let t = curTurn + delta;
+  if (document.getElementById("skip-idle-toggle").checked) {
+    t = findMeaningfulTurn(curTurn, delta > 0 ? 1 : -1);
+  }
+  setTurn(t);
+}
+function findMeaningfulTurn(from, dir) {
+  let t = from + dir;
+  while (t > 0 && t < timeline.maxTurn) {
+    const snap = snapAt(t);
+    if (snap.delta && Object.values(snap.delta).some(list => Array.isArray(list) && list.length > 0)) return t;
+    t += dir;
+  }
+  return Math.max(0, Math.min(t, timeline.maxTurn));
+}
+function togglePlay() {
+  if (playTimer) { stopPlay(); return; }
+  document.getElementById("tp-play").textContent = "❚❚";
+  const speed = parseInt(document.getElementById("tp-speed").value, 10);
+  playTimer = setInterval(() => {
+    if (curTurn >= timeline.maxTurn) { stopPlay(); return; }
+    let next = curTurn + 1;
+    if (document.getElementById("skip-idle-toggle").checked) next = findMeaningfulTurn(curTurn, 1);
+    setTurn(next);
+  }, speed);
+}
+function stopPlay() {
+  if (playTimer) clearInterval(playTimer);
+  playTimer = null;
+  document.getElementById("tp-play").textContent = "▶";
+}
+
+document.getElementById("tp-first").addEventListener("click", () => { stopPlay(); setTurn(0, { animate: false }); });
+document.getElementById("tp-prev").addEventListener("click", () => stepTurn(-1));
+document.getElementById("tp-next").addEventListener("click", () => stepTurn(1));
+document.getElementById("tp-last").addEventListener("click", () => { stopPlay(); setTurn(timeline.maxTurn, { animate: false }); });
+document.getElementById("tp-play").addEventListener("click", togglePlay);
+document.getElementById("tp-range").addEventListener("input", (e) => { stopPlay(); setTurn(parseInt(e.target.value, 10), { animate: false }); });
+document.getElementById("tp-speed").addEventListener("change", () => { if (playTimer) { stopPlay(); togglePlay(); } });
+
+document.addEventListener("keydown", (e) => {
+  const tag = (e.target.tagName || "").toLowerCase();
+  if (tag === "input" || tag === "select" || tag === "textarea") return;
+  if (!timeline) return;
+  if (e.key === "ArrowLeft") stepTurn(e.shiftKey ? -10 : -1);
+  else if (e.key === "ArrowRight") stepTurn(e.shiftKey ? 10 : 1);
+  else if (e.key === " ") { e.preventDefault(); togglePlay(); }
+  else if (e.key === "Home") { stopPlay(); setTurn(0, { animate: false }); }
+  else if (e.key === "End") { stopPlay(); setTurn(timeline.maxTurn, { animate: false }); }
 });
 
-loadConfig().then(loadGames);
+// =============================================================================
+// プレイヤー詳細モーダル
+// =============================================================================
+function openPlayerDetail(pid) {
+  const seat = snapAt(curTurn).seats[pid];
+  const events = [];
+  for (const t of timeline.snaps) {
+    if (!t.delta) continue;
+    for (const [key, list] of Object.entries(t.delta)) {
+      if (!Array.isArray(list)) continue;
+      for (const item of list) {
+        const involved = typeof item === "string" ? board.offers[item] : item;
+        if (!involved) continue;
+        if (involved.player_id === pid || involved.challenger_id === pid || involved.opponent_id === pid) {
+          events.push({ turn: t.turn, key, item: involved });
+        }
+      }
+    }
+  }
+  document.getElementById("modal-title").textContent = `${pid} の記録`;
+  const identity = (board.seats.find(s => s.player_id === pid) || {}).identity;
+  const header = identity ? `<p class="sit-muted">${escapeHtml(identity.name || identity.model_id)}（${escapeHtml(identity.vendor || "")}）</p>` : "";
+  const timelineHtml = events.map(e => `<div class="timeline-item">
+    <span class="phase-badge">T${e.turn}</span> <span class="action-type">${escapeHtml(e.key)}</span>
+    <div class="content">${escapeHtml(JSON.stringify(e.item))}</div>
+  </div>`).join("") || "<p class='detail-empty'>関与イベントなし</p>";
+  const rec = recordFor(pid, curTurn);
+  document.getElementById("modal-body").innerHTML = header +
+    `<p>★${seat.stars} ／ ${rec.wins}勝${rec.losses}敗${rec.draws}分 ／ 状態: ${seat.status}</p>` +
+    `<div class="detail-section"><h3>関与イベント時系列</h3>${timelineHtml}</div>`;
+  document.getElementById("modal-overlay").classList.add("active");
+}
+document.getElementById("modal-close").addEventListener("click", closePlayerDetail);
+document.getElementById("modal-overlay").addEventListener("click", (e) => {
+  if (e.target.id === "modal-overlay") closePlayerDetail();
+});
+function closePlayerDetail() {
+  document.getElementById("modal-overlay").classList.remove("active");
+}
+
+// =============================================================================
+// 初期化
+// =============================================================================
+document.getElementById("game-select").addEventListener("change", (e) => loadGame(e.target.value));
+document.getElementById("refresh-btn").addEventListener("click", () => loadGames());
+document.getElementById("dense-toggle").addEventListener("change", (e) => {
+  document.getElementById("player-grid").classList.toggle("grid-dense", e.target.checked);
+  try { localStorage.setItem("viewer-density", e.target.checked ? "1" : "0"); } catch (err) {}
+});
+document.getElementById("god-toggle").addEventListener("click", async () => {
+  if (!godMode) {
+    if (!godPublic && !godToken) {
+      const input = document.getElementById("god-token-input");
+      if (input.hidden) { input.hidden = false; input.focus(); return; }
+      godToken = input.value;
+      input.value = "";
+      input.hidden = true;
+      if (!godToken) return;
+      storeGodToken(godToken);
+    }
+    godMode = true;
+  } else {
+    godMode = false;
+  }
+  updateGodControls();
+  if (currentGame) {
+    const keepTurn = curTurn;
+    await loadGame(currentGame);
+    setTurn(keepTurn, { animate: false });
+  }
+});
+
+(async function init() {
+  try {
+    const density = localStorage.getItem("viewer-density");
+    if (density === "1") {
+      document.getElementById("dense-toggle").checked = true;
+      document.getElementById("player-grid").classList.add("grid-dense");
+    }
+  } catch (e) {}
+  await loadViewerConfig();
+  godToken = loadStoredGodToken();
+  if (godPublic) godMode = true;
+  else if (godToken) godMode = true; // 楽観的に復元。無効なら次のfetchで403→forceGodLogout
+  updateGodControls();
+  await loadGames();
+})();
 </script>
 </body>
 </html>

@@ -527,3 +527,104 @@ body > .god-banner { margin: 0; border-radius: 0; text-align: center; }
   font-size: 10px; color: #ff9800; margin-left: 2px; white-space: nowrap;
 }
 #cost-info:hover { text-decoration: underline; color: var(--cash); }
+
+/* === 以下 限定ジャンケン固有（529行目以降に追記のみ。dangou-card移植分は上を触らない） === */
+
+/* トランスポート（ターン送り） */
+.transport {
+  background: var(--surface); border-bottom: 1px solid var(--border);
+  padding: 8px 14px; display: flex; align-items: center; gap: 10px;
+  flex-wrap: wrap; position: sticky; top: 0; z-index: 5;
+}
+.tp-btn {
+  background: var(--input-bg); color: var(--text); border: 1px solid var(--border-accent);
+  border-radius: 4px; padding: 4px 9px; cursor: pointer; font-size: 13px; line-height: 1;
+}
+.tp-btn:hover { border-color: var(--accent); }
+.tp-play { min-width: 32px; }
+.tp-scrub { flex: 1; min-width: 160px; position: relative; }
+.tp-range { width: 100%; }
+.tp-marks { position: relative; height: 8px; margin-top: 2px; }
+.tp-mark {
+  position: absolute; top: 0; width: 2px; height: 40%; background: rgba(255,255,255,0.35);
+  cursor: pointer; transform: translateX(-1px);
+}
+.tp-mark.mark-resolve { background: var(--text-secondary); height: 40%; }
+.tp-mark.mark-exit { background: #4caf50; height: 70%; }
+.tp-mark.mark-elim { background: var(--text-danger); height: 100%; }
+.tp-mark.mark-interest { background: #c9a53e; height: 30%; }
+.tp-label { font-size: 12px; color: var(--text-secondary); white-space: nowrap; min-width: 70px; text-align: center; }
+.tp-speed { background: var(--input-bg); color: var(--text); border: 1px solid var(--border); border-radius: 4px; font-size: 12px; }
+
+/* 密度トグル */
+.grid.grid-dense { grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); }
+
+/* ★メダリオン（.emotion-bigと同寸・同角丸。感情実装時に入れ替え可能にする） */
+.star-big {
+  flex: 0 0 88px; height: 88px; border-radius: 10px; background: var(--input-bg);
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  position: relative; border: 1px solid var(--border);
+}
+.star-big .star-count { font-size: 30px; font-weight: bold; line-height: 1; font-variant-numeric: tabular-nums; }
+.star-big .star-pips { font-size: 11px; letter-spacing: 1px; margin-top: 2px; }
+.star-big.safe { color: var(--cash); border-color: var(--cash); }
+.star-big.warn { color: #ff9800; border-color: #ff9800; }
+.star-big.danger { color: var(--text-danger); border-color: var(--text-danger); animation: pulse 1.2s infinite; }
+.star-big.dead { color: var(--text-muted); border-color: var(--border); opacity: 0.6; }
+.star-big.star-gain { animation: star-pop 600ms ease-out; }
+.star-big.star-loss { animation: star-shake 600ms ease-out; }
+@keyframes star-pop { 0%,100% { transform: scale(1); } 40% { transform: scale(1.3); filter: brightness(1.6); } }
+@keyframes star-shake { 0%,100% { transform: translateX(0); } 20% { transform: translateX(-4px); } 60% { transform: translateX(4px); filter: brightness(0.6); } }
+.star-delta {
+  position: absolute; top: -6px; right: -4px; font-size: 12px; font-weight: bold;
+  color: var(--accent); animation: star-float 900ms ease-out forwards; pointer-events: none;
+}
+@keyframes star-float { from { opacity: 1; transform: translateY(0); } to { opacity: 0; transform: translateY(-24px); } }
+
+/* パネル状態の追加バリエーション */
+.panel.exited { border-color: #2e7d4a; }
+.badge.exited { background: #1b5e20; color: #a5d6a7; }
+.panel.focus { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.panel.linked { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+.panel .last-event { font-size: 12px; color: var(--text-soft); margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.panel .match-slot { font-size: 12px; color: var(--text-soft); margin-top: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.finance-detail.god-only { color: var(--text-content); }
+
+/* 出した手 */
+.hand { display: inline-flex; align-items: center; gap: 2px; font-size: 12px; margin-left: 4px; }
+.hand-hidden { color: var(--text-muted); font-size: 11px; }
+.hand-rock, .hand-scissors, .hand-paper { color: var(--text-content); }
+
+/* 対戦レーン */
+.match-lane { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+.match-col { min-width: 0; }
+.match-row {
+  font-size: 12.5px; padding: 4px 6px; margin: 3px 0; border-radius: 4px;
+  background: var(--input-bg); display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+}
+.match-row.resolved { border-left: 3px solid var(--cash); }
+.match-row.accepted { border-left: 3px solid var(--action-type); }
+.match-row.pending { border-left: 3px solid var(--text-muted); }
+.match-row.declined { border-left: 3px solid var(--text-danger); opacity: 0.8; }
+.match-side { display: inline-flex; align-items: center; gap: 2px; }
+.match-side.win { color: var(--cash); }
+.match-side.lose { color: var(--text-muted); }
+.vs { color: var(--text-muted); font-size: 11px; }
+.match-outcome { margin-left: auto; font-size: 11.5px; }
+@media (max-width: 700px) { .match-lane { grid-template-columns: 1fr; } }
+
+/* 掲示板バー・スパークライン */
+.board-row { display: flex; align-items: center; gap: 6px; font-size: 12.5px; margin: 3px 0; }
+.board-label { width: 64px; flex-shrink: 0; }
+.board-bar { flex: 1; height: 8px; background: var(--input-bg); border-radius: 4px; overflow: hidden; }
+.board-fill { display: block; height: 100%; }
+.board-fill.hand-rock { background: #e94560; }
+.board-fill.hand-scissors { background: #4fc3f7; }
+.board-fill.hand-paper { background: #ffd479; }
+.board-num { width: 30px; text-align: right; font-variant-numeric: tabular-nums; }
+.board-total { margin-top: 6px; }
+.board-spark { width: 100%; height: 46px; margin-top: 8px; }
+.spark-rock { fill: none; stroke: #e94560; stroke-width: 1.5; }
+.spark-scissors { fill: none; stroke: #4fc3f7; stroke-width: 1.5; }
+.spark-paper { fill: none; stroke: #ffd479; stroke-width: 1.5; }
+.spark-cursor { stroke: var(--text-muted); stroke-width: 1; stroke-dasharray: 2 2; }

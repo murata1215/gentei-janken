@@ -117,7 +117,7 @@ Caddy側の変更はsudoが必要でuso8mでは直接実行できない。DevRel
 
 - `log_skip`: 現行`viewer/static/index.html`にポーリング（`setInterval`等）が
   無く、アクセスログが肥大しないため不要。将来ポーリングを追加する場合、
-  gentei-jankenのAPIパスは`/api/games/{game_id}/(state|turns)`の1セグメントで
+  gentei-jankenのAPIパスは`/api/games/{game_id}/(state|turns|board)`の1セグメントで
   あり、dangou-cardの2セグメント用正規表現（`^/api/games/[^/]+/[^/]+/state/?$`）
   をコピペしても一切マッチしない点に注意。
 - `handle_errors` + placeholder: `/home/devrelay/testflight/...`はdevrelay
@@ -133,9 +133,40 @@ Agent経由で再起動する場合も、対象環境でuser systemd busへア�
 3. 再度statusを確認する。
 4. `curl -fsS http://127.0.0.1:9027/api/games`でローカル疎通を確認する。
 
-## 既知の制約（フェーズ2で対応予定、`doc/issues.md`参照）
+## 盤面API（`GET /api/games/{id}/board`）
 
-- `viewer/static/index.html`はJSON羅列の最小UI（dangou-card相当の盤面UIは未実装）
-- godトークンはJS変数保持のみでリロードすると消える（`sessionStorage`化は未対応）
-- `/api/games/{id}/state`の呼び出しに`view`が付いておらず、GODモードでも
-  state サマリは常にpublic相当のまま（`turns`エンドポイントのみview切替が効く）
+サイクル1.7で新設。盤面UI（`viewer/static/index.html`）はこのエンドポイントのみを使う
+（`/state`/`/turns`は監査・デバッグ用として存続、UIからは呼ばない）。
+
+- **畳み込みはサーバ側で行う**: publicイベント列は自己完結していない
+  （`MATCH_ACCEPTED`にchallenger_idが無い等）ため、`viewer/log_parser.py::_fold_events`が
+  常にgod完全体のイベント列から席（★・生死・現金・借金・手札内訳）・申込索引・
+  掲示板の時系列を構築し、その後public/godへ投影する。フロントに秘匿判定ロジックを
+  持たせない設計（`rules/project.md`「ホワイトリスト方式に統一」）。
+- **`?from_turn=N`**: N超のターンのみ`turns`配列に含める（差分ポーリング用。フェーズ1では
+  フロントは常に`from_turn=0`で全件取得）。`seats`（最新状態）は常に全件返る。
+- **`If-None-Match`**: ログのfingerprint（mtime+size）と一致すれば304。完走試合は
+  fingerprintが恒久的に一致するため、以後のリクエストは実質304のみになる。
+- **`derivation`**: 畳み込みの自己検証結果（★ゼロサム・engine記録値との突き合わせ）。
+  `stars_zero_sum_ok: false`が出たら畳み込みロジックにバグがある。
+- **`VIEWER_REVEAL_IDENTITY`**（既定`after_game_end`）: publicでプレイヤーの正体
+  （モデル名等）を出す条件。`never`/`after_game_end`/`always`。godは常に出す。
+  `*_seat_map.json`はv1（`{pid: model_id}`フラットdict）/v2
+  （`{"version":2,"seats":{...}}`）の両対応。Bot戦（`scripts/dry_run.py`）は
+  seat_mapを書き出さないため、identityキー自体が欠落する（`null`ではなくキー欠落）。
+
+秘匿検証の実施例（本番URLに対して、値は表示しない）:
+
+```bash
+curl -fsS "https://gentei-janken-viewer.devrelay.io/api/games/<game_id>/board?view=public" \
+  | grep -oE '"(cash|debt|hand_counts|hand_total|challenger_hand|opponent_hand)"'
+# → 出力が空であること
+```
+
+## 既知の制約（`doc/issues.md`参照）
+
+- ライブポーリング未実装（サイクル1.7時点ではフロントは手動更新ボタンのみ）
+- ★移動の演出・ペア強調の視覚効果は簡易版（Phase 4で拡充予定）
+- 感情アイコンの枠は用意済みだが、`prompt_builder`がemotionを要求していないため
+  実データは常に空（`?demo_emotion=1`のような開発者向け検証手段は未実装）
+- コストモーダル・実況席（dangou-card相当）は未移植（データ生成元が無い）

@@ -71,6 +71,25 @@
 - [ ] §12.2 Botシミュレーションで未決事項を検証・決定
 - [ ] build_action_prompt()にreasoning/emotionの要求を追加するか判断
       （配線済みだが現状プロンプトが要求していないため実測では常に空）
-- [ ] Viewer UIの盤面化（現行はJSON羅列の最小フロント。dangou-card相当の見た目にする）
-- [ ] Viewer UIのgodトークンをsessionStorage化・state取得へのview引数付与
-      （現状GODモードにしてもstateサマリはpublicのまま。フェーズ2）
+## Viewerの盤面UI化（サイクル1.7・完了）
+
+- [x] `GET /api/games/{id}/board`新設（server側でイベント畳み込み→席・申込索引・
+      掲示板時系列を構築、public/god投影も内部で確定）。既存`/state`/`/turns`は凍結・存続
+- [x] `viewer/log_parser.py::_fold_events`: 20人×120ターン(1062件)を実測で
+      ★/現金/借金/手札枚数がengine記録値と全件一致、★ゼロサム毎ターン検証
+- [x] `viewer/static/index.html`全面書き直し（98行→900行弱）: 20席グリッド・
+      ★メダリオン・対戦3列レーン・掲示板バー+スパークライン・ドラマ目盛り付き
+      トランスポート（スライダー/再生/無風スキップ）・選手詳細モーダル
+- [x] `viewer/static/style.css`は529行目以降に追記のみ（先頭529行はdangou-cardと
+      バイト一致のままsha256でテスト固定）
+- [x] godトークンをsessionStorage化、`403`時に一元downgrade（`forceGodLogout`）。
+      旧`prompt()`＋変数保持（リロードで消える）バグを解消
+- [x] `VIEWER_REVEAL_IDENTITY`環境変数（never/after_game_end既定/always）でモデル正体の
+      public開示ポリシーを制御。seat_map v1/v2両対応ローダ、Bot戦（seat_map無し）は
+      identityキー自体を欠落させる
+- [x] Playwrightでheadless実ブラウザ検証（コンソールエラー0件、public/godの手の
+      開示境界を実測、375px幅でも崩れないことを確認）
+- [x] テスト67件新規（fold/board/frontend静的検証）、全224件PASS
+- [x] 本番反映・実URLでリーク検証（5試合でcash/debt/hand_*/card_idパターン0件）
+- [ ] Phase 4（別サイクル）: ライブポーリング、★移動演出、ペア強調、コストモーダル、
+      感情の本配線、実況席の復活

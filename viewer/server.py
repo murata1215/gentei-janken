@@ -9,6 +9,10 @@
   VIEWER_TOKEN       簡易認証トークン（未設定: 認証なし）
   VIEWER_GOD_TOKEN   神視点トークン（未設定: 神視点は無効）
   VIEWER_GOD_PUBLIC  神視点をトークン無しで全員に公開する（1/true/yes/on で有効。既定: 無効）
+  VIEWER_REVEAL_IDENTITY
+                     public viewでプレイヤーの正体（モデル名等）を出す条件。
+                     never（常に出さない） / after_game_end（GAME_END後のみ、既定）
+                     / always（進行中も出す）。god viewは常に出す。
 
 dangou-card の public/god 2段認証パターン（check_token / check_view）をそのまま
 流用する（rules/project.md「Viewerの公開表示と神視点を分離する」参照）。
@@ -19,11 +23,11 @@ import secrets
 from pathlib import Path
 from typing import Optional
 
-from fastapi import Depends, FastAPI, HTTPException, Path as PathParam, Query, Request
+from fastapi import Depends, FastAPI, HTTPException, Path as PathParam, Query, Request, Response
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from viewer.log_parser import get_game_state, get_round_states, list_games
+from viewer.log_parser import board_fingerprint, get_board, get_game_state, get_round_states, list_games
 
 # --- 既定値の単一ソース ---
 # 変更する場合は Caddy sites.d の reverse_proxy 先と doc/viewer_operations.md も
@@ -46,6 +50,9 @@ LOGS_DIR = Path(os.environ.get("VIEWER_LOG_ROOT", str(DEFAULT_LOGS_DIR)))
 TOKEN = os.environ.get("VIEWER_TOKEN", "")
 GOD_TOKEN = os.environ.get("VIEWER_GOD_TOKEN", "")
 GOD_PUBLIC = os.environ.get("VIEWER_GOD_PUBLIC", "0").strip().lower() in {"1", "true", "yes", "on"}
+REVEAL_IDENTITY = os.environ.get("VIEWER_REVEAL_IDENTITY", "after_game_end").strip().lower()
+if REVEAL_IDENTITY not in {"never", "after_game_end", "always"}:
+    REVEAL_IDENTITY = "after_game_end"
 
 # --- FastAPIアプリ ---
 app = FastAPI(
@@ -123,8 +130,63 @@ async def api_turns(
     view: str = Query("public"),
     _=Depends(check_token),
 ):
-    """ターン別の盤面状況を返す（§8.2の公開/秘匿境界に従う）"""
+    """
+    ターン別の盤面状況を返す（§8.2の公開/秘匿境界に従う）
+
+    このエンドポイントは生イベントのredact済みダンプ（監査・デバッグ用）。
+    盤面UIは `/api/games/{game_id}/board` を使う。
+    """
     return get_round_states(LOGS_DIR, game_id, view=check_view(request, view))
+
+
+def _should_reveal_identity(view: str, completed: bool) -> bool:
+    """VIEWER_REVEAL_IDENTITYの設定に基づき、publicでプレイヤーの正体を出すか判定する"""
+    if view == "god":
+        return True
+    if REVEAL_IDENTITY == "always":
+        return True
+    if REVEAL_IDENTITY == "after_game_end":
+        return completed
+    return False  # "never"
+
+
+@app.get("/api/games/{game_id}/board")
+async def api_board(
+    request: Request,
+    response: Response,
+    game_id: str = PathParam(..., pattern=GAME_ID_PATTERN),
+    view: str = Query("public"),
+    from_turn: int = Query(0, ge=0),
+    _=Depends(check_token),
+):
+    """
+    盤面UI向けの畳み込み済み状態を返す（§8.2の公開/秘匿境界に従う）
+
+    サーバ側でイベント列を畳み込み、席（★・生死・初期借入額等）・申込索引・
+    掲示板の時系列を構築する。public/godの投影も本エンドポイント内で確定する
+    （フロントに秘匿判定ロジックを持たせない）。
+
+    `If-None-Match` が現在のログのfingerprintと一致すれば304を返す
+    （2秒ポーリング時の帯域対策。完走試合はfingerprintが恒久的に一致するため
+    実質304のみになる）。
+    """
+    view = check_view(request, view)
+    fp = board_fingerprint(LOGS_DIR, game_id)
+    etag = f'"{fp}"' if fp is not None else None
+    if etag is not None and request.headers.get("if-none-match") == etag:
+        return Response(status_code=304, headers={"ETag": etag})
+
+    # reveal_identity判定にはcompletedが要るが、フルの畳み込みを2回行うのは
+    # 無駄なので、軽量なget_game_state()でcompletedだけ先に確認する
+    # （get_game_stateは1パス走査のみで、席別状態を組み立てる畳み込みより軽い）。
+    state = get_game_state(LOGS_DIR, game_id, view="god")
+    if not state.get("found"):
+        return {"game_id": game_id, "found": False}
+    reveal_identity = _should_reveal_identity(view, state["completed"])
+    result = get_board(LOGS_DIR, game_id, view=view, from_turn=from_turn, reveal_identity=reveal_identity)
+    if etag is not None:
+        response.headers["ETag"] = etag
+    return result
 
 
 def main():

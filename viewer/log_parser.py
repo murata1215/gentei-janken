@@ -20,6 +20,9 @@ import time
 from pathlib import Path
 from typing import Any
 
+from engine.config import GameConfig
+from llm.models import get_model
+
 # §8.2の「公開」区分に基づくイベント種別ごとの公開キー一覧。
 # ここに無いキーはpublic viewから削除する（god viewはそのまま全部通す）。
 PUBLIC_EVENT_DATA_KEYS: dict[str, set[str]] = {
@@ -125,6 +128,19 @@ class LogCache:
                     continue  # 書きかけの最終行はスキップ
         self._cache[key] = (stat.st_mtime, stat.st_size, events)
         return events
+
+    def fingerprint(self, path: Path) -> str | None:
+        """
+        現在のファイル状態（mtime+size）を表す文字列を返す（ETag用）。
+        ファイルが存在しなければNone。read_jsonl()と同じ差分検知基準を使うため、
+        「フィンガープリントが変わっていない」＝「read_jsonl()の結果も変わっていない」
+        が保証される。
+        """
+        try:
+            stat = path.stat()
+        except FileNotFoundError:
+            return None
+        return f"{stat.st_mtime}-{stat.st_size}"
 
 
 _cache = LogCache()
@@ -258,3 +274,520 @@ def get_round_states(logs_dir: Path, game_id: str, view: str = "public") -> list
         {"turn": turn, "events": by_turn[turn]}
         for turn in sorted(by_turn.keys())
     ]
+
+
+# =============================================================================
+# 盤面畳み込み（GET /api/games/{id}/board）
+#
+# public イベント列は自己完結していない（MATCH_ACCEPTEDにchallenger_idが無い等）ため、
+# 畳み込みは常に「god完全体」の生イベント列に対して行い、結果をpublic/godへ
+# 投影する（deny-by-default）。JS側には状態機械を持たせない
+# （rules/project.md「ホワイトリスト方式に統一」参照）。
+# =============================================================================
+
+PUBLIC_SEAT_KEYS: set[str] = {
+    "player_id", "seat_index", "initial_loan", "stars",
+    "status", "exited_turn", "elimination_type",
+}
+"""畳み込み結果の「席」オブジェクトのうちpublicで許可するキー（§8.2準拠）"""
+
+_PUBLIC_SEAT_POST_GAME_KEYS = PUBLIC_SEAT_KEYS | {"final_assets"}
+"""GAME_END後はfinal_assetsも公開してよい（_PLAYER_EXITED_POST_GAME_KEYSと同じ期限付きゲート）"""
+
+PUBLIC_OFFER_KEYS: set[str] = {
+    "offer_id", "challenger_id", "opponent_id",
+    "offered_turn", "accepted_turn", "resolved_turn", "closed_turn", "status", "outcome",
+}
+"""畳み込み結果の「申込」オブジェクトのうちpublicで許可するキー（出した手は含めない）"""
+
+PUBLIC_TURN_SEAT_KEYS: set[str] = {"stars", "status", "exited_turn", "elimination_type"}
+"""turns[].seats_changed の差分に許可するキー（cash/debt/hand_*はgod専用）"""
+
+_PUBLIC_TURN_SEAT_POST_GAME_KEYS = PUBLIC_TURN_SEAT_KEYS | {"final_assets"}
+
+_INITIAL_HAND_TYPES = ("ROCK", "SCISSORS", "PAPER")
+
+
+def _resolve_rules(game_start_data: dict[str, Any]) -> GameConfig:
+    """
+    GAME_STARTのdataからGameConfigを復元する。
+
+    rules/project.md「設定の単一ソース化ルール」に従い、Viewer側で独自の
+    定数（initial_stars=3等）を持たない。scripts/dry_run.py・scripts/llm_trial.py
+    と同じ分岐（20人×120ターンはdefault_20()、それ以外はdev_small()）で
+    GameConfigプリセットを再現する。
+    """
+    num_players = game_start_data.get("num_players") or 4
+    total_turns = game_start_data.get("total_turns") or 20
+    if num_players == 20 and total_turns == 120:
+        return GameConfig.default_20()
+    return GameConfig.dev_small(num_players=num_players, total_turns=total_turns)
+
+
+def _rules_dict(config: GameConfig, total_turns_actual: int) -> dict[str, Any]:
+    """§8.1/§8.2に照らして全部公開してよいルールパラメータの辞書を返す（public/god共通）"""
+    r, s, p = config.cards_per_hand
+    return {
+        "num_players": config.num_players,
+        "total_turns": total_turns_actual,
+        "initial_stars": config.initial_stars,
+        "initial_cards_total": r + s + p,
+        "survival_stars_min": config.survival_stars_min,
+        "surplus_star_buyback": config.surplus_star_buyback,
+        "interest_rate": config.interest_rate,
+        "interest_interval_turns": config.interest_interval_turns,
+        "reveal_hands_publicly": config.reveal_hands_publicly,
+        "reveal_hand_count": config.reveal_hand_count,
+    }
+
+
+def load_identities(logs_dir: Path, game_id: str) -> dict[str, dict[str, Any]] | None:
+    """
+    `{game_id}_seat_map.json` からプレイヤーの正体情報を読み込む。
+
+    v2（`{"version": 2, "seats": {pid: {...}}}`）とv1（`{pid: model_id}`の
+    フラットdict、scripts/llm_trial.py現行形式）の両方に対応する。v1は
+    `llm.models.get_model()`（先勝ちルール）でprovider/name/vendor/tierを補完する。
+    ファイルが無い・壊れている場合はNoneを返す（呼び出し側が`identity`キー自体を
+    欠落させる判断に使う）。Bot戦（scripts/dry_run.py）はseat_mapを書き出さないため
+    常にNoneになる。
+    """
+    path = logs_dir / f"{game_id}_seat_map.json"
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return None
+    if not isinstance(raw, dict):
+        return None
+
+    if raw.get("version") == 2 and isinstance(raw.get("seats"), dict):
+        return raw["seats"]
+
+    identities: dict[str, dict[str, Any]] = {}
+    for pid, model_id in raw.items():
+        if not isinstance(model_id, str):
+            continue
+        try:
+            info = get_model(model_id)
+        except ValueError:
+            identities[pid] = {"model_id": model_id, "vendor": None}
+            continue
+        identities[pid] = {
+            "model_id": info.model_id, "provider": info.provider,
+            "name": info.name, "vendor": info.vendor, "tier": info.tier,
+        }
+    return identities or None
+
+
+def _new_seat(pid: str, seat_index: int, initial_loan: int, config: GameConfig) -> dict[str, Any]:
+    r, s, p = config.cards_per_hand
+    return {
+        "player_id": pid,
+        "seat_index": seat_index,
+        "initial_loan": initial_loan,
+        "stars": config.initial_stars,
+        "cash": initial_loan,
+        "debt": initial_loan,
+        "hand_total": r + s + p,
+        "hand_counts": {"ROCK": r, "SCISSORS": s, "PAPER": p},
+        "reserved_count": 0,
+        "wins": 0, "losses": 0, "draws": 0,
+        "matches_resolved": 0,
+        "status": "alive",
+        "exited_turn": None,
+        "elimination_type": None,
+        "final_assets": None,
+    }
+
+
+def _fold_events(events: list[dict[str, Any]]) -> dict[str, Any]:
+    """
+    イベント列を発行順に畳み込み、席（プレイヤー）・申込・掲示板のgod完全体を構築する。
+
+    `_FOLD_HANDLERS` に無い未知のイベント種別は無視する（engine/trades.py等が将来
+    有線化されカードが席間を移動しても、畳み込みが例外で落ちない構造にするため。
+    その場合`derivation`の各cross_checkが不一致を検出する）。
+    """
+    seats: dict[str, dict[str, Any]] = {}
+    seat_order: list[str] = []
+    offers: dict[str, dict[str, Any]] = {}
+    board = {"ROCK": 0, "SCISSORS": 0, "PAPER": 0}
+    board_history: list[dict[str, Any]] = []
+    turns_out: list[dict[str, Any]] = []
+    completed = False
+    current_turn = 0
+    config: GameConfig | None = None
+
+    stars_removed_total = 0
+    stars_checked = 0
+    stars_mismatches = 0
+    hand_checked = 0
+    hand_mismatches = 0
+    board_checked = 0
+    board_mismatches = 0
+
+    by_turn: dict[int, list[dict[str, Any]]] = {}
+    for e in events:
+        t = e.get("round_num")
+        if isinstance(t, int):
+            by_turn.setdefault(t, []).append(e)
+        elif e.get("event_type") == "GAME_START":
+            by_turn.setdefault(0, []).append(e)
+
+    def as_event_record(etype: str, data: dict[str, Any]) -> dict[str, Any]:
+        return {"event_type": etype, **data}
+
+    for turn in sorted(by_turn.keys()):
+        changed: dict[str, dict[str, Any]] = {}
+        delta: dict[str, list[Any]] = {
+            "offered": [], "accepted": [], "withdrawn": [], "declined": [], "expired": [],
+            "resolved": [], "exited": [], "eliminated": [], "rejections": [],
+        }
+
+        def mark_changed(pid: str, **kv: Any) -> None:
+            changed.setdefault(pid, {}).update(kv)
+
+        for e in by_turn[turn]:
+            etype = e.get("event_type")
+            data = e.get("data", {}) or {}
+
+            if etype == "GAME_START":
+                config = _resolve_rules(data)
+                for idx, (pid, loan) in enumerate(data.get("initial_loans", {}).items(), start=1):
+                    seat_order.append(pid)
+                    seats[pid] = _new_seat(pid, idx, loan, config)
+
+            elif etype == "MATCH_OFFERED":
+                oid, challenger_id, opponent_id = data["offer_id"], data["challenger_id"], data["opponent_id"]
+                offers[oid] = {
+                    "offer_id": oid, "challenger_id": challenger_id, "opponent_id": opponent_id,
+                    "offered_turn": turn, "accepted_turn": None, "resolved_turn": None,
+                    "closed_turn": None, "status": "pending", "outcome": None,
+                    "challenger_hand": None, "opponent_hand": None,
+                }
+                seat = seats[challenger_id]
+                seat["reserved_count"] += 1
+                mark_changed(challenger_id, reserved_count=seat["reserved_count"])
+                delta["offered"].append(oid)
+
+            elif etype == "MATCH_ACCEPTED":
+                oid = data["offer_id"]
+                offer = offers.get(oid)
+                if offer is None:
+                    continue
+                offer["status"] = "accepted"
+                offer["accepted_turn"] = turn
+                seat = seats[data["opponent_id"]]
+                seat["reserved_count"] += 1
+                mark_changed(data["opponent_id"], reserved_count=seat["reserved_count"])
+                delta["accepted"].append(oid)
+
+            elif etype in ("MATCH_DECLINED", "MATCH_WITHDRAWN", "MATCH_EXPIRED"):
+                oid = data["offer_id"]
+                offer = offers.get(oid)
+                if offer is None:
+                    continue
+                status_map = {
+                    "MATCH_DECLINED": "declined", "MATCH_WITHDRAWN": "withdrawn", "MATCH_EXPIRED": "expired",
+                }
+                offer["status"] = status_map[etype]
+                offer["closed_turn"] = turn
+                seat = seats[offer["challenger_id"]]
+                seat["reserved_count"] = max(0, seat["reserved_count"] - 1)
+                mark_changed(offer["challenger_id"], reserved_count=seat["reserved_count"])
+                delta_key = {"MATCH_DECLINED": "declined", "MATCH_WITHDRAWN": "withdrawn", "MATCH_EXPIRED": "expired"}[etype]
+                delta[delta_key].append(oid)
+
+            elif etype == "MATCH_RESOLVED":
+                oid = data["offer_id"]
+                offer = offers.get(oid)
+                if offer is not None:
+                    offer.update({
+                        "status": "resolved", "resolved_turn": turn, "closed_turn": turn,
+                        "outcome": data["outcome"],
+                        "challenger_hand": data["challenger_hand"], "opponent_hand": data["opponent_hand"],
+                    })
+                challenger_id, opponent_id = data["challenger_id"], data["opponent_id"]
+                c_seat, o_seat = seats[challenger_id], seats[opponent_id]
+                for seat, hand in ((c_seat, data["challenger_hand"]), (o_seat, data["opponent_hand"])):
+                    seat["reserved_count"] = max(0, seat["reserved_count"] - 1)
+                    seat["hand_total"] = max(0, seat["hand_total"] - 1)
+                    if seat["hand_counts"].get(hand, 0) > 0:
+                        seat["hand_counts"][hand] -= 1
+                    seat["matches_resolved"] += 1
+                outcome = data["outcome"]
+                if outcome == "challenger_win":
+                    c_seat["stars"] += 1
+                    o_seat["stars"] -= 1
+                    c_seat["wins"] += 1
+                    o_seat["losses"] += 1
+                elif outcome == "opponent_win":
+                    o_seat["stars"] += 1
+                    c_seat["stars"] -= 1
+                    o_seat["wins"] += 1
+                    c_seat["losses"] += 1
+                else:
+                    c_seat["draws"] += 1
+                    o_seat["draws"] += 1
+                for pid, seat in ((challenger_id, c_seat), (opponent_id, o_seat)):
+                    mark_changed(
+                        pid, stars=seat["stars"], reserved_count=seat["reserved_count"],
+                        hand_total=seat["hand_total"], matches_resolved=seat["matches_resolved"],
+                    )
+                delta["resolved"].append(as_event_record("MATCH_RESOLVED", data))
+
+            elif etype in ("MATCH_OFFER_REJECTED", "MATCH_ACCEPT_REJECTED", "EXIT_REJECTED",
+                           "REPAY_REJECTED", "TRANSFER_REJECTED"):
+                delta["rejections"].append(as_event_record(etype, data))
+
+            elif etype == "PLAYER_EXITED":
+                pid = data["player_id"]
+                seat = seats[pid]
+                stars_removed_total += seat["stars"]
+                seat["status"] = "exited"
+                seat["exited_turn"] = turn
+                seat["final_assets"] = data.get("final_assets")
+                mark_changed(pid, status="exited", exited_turn=turn, final_assets=seat["final_assets"])
+                delta["exited"].append(as_event_record("PLAYER_EXITED", data))
+
+            elif etype in ("FORCED_EXIT", "TIMEOUT"):
+                pid = data["player_id"]
+                seat = seats[pid]
+                stars_before = data.get("stars_before")
+                stars_checked += 1
+                if stars_before is not None and stars_before != seat["stars"]:
+                    stars_mismatches += 1
+                cards_destroyed = data.get("cards_destroyed")
+                hand_checked += 1
+                if cards_destroyed is not None and cards_destroyed != seat["hand_total"]:
+                    hand_mismatches += 1
+                stars_removed_total += data.get("stars_confiscated", seat["stars"])
+                seat["status"] = "eliminated"
+                seat["exited_turn"] = turn
+                seat["elimination_type"] = data.get("elimination_type", etype)
+                seat["stars"] = 0
+                seat["hand_total"] = 0
+                seat["hand_counts"] = {"ROCK": 0, "SCISSORS": 0, "PAPER": 0}
+                mark_changed(
+                    pid, status="eliminated", exited_turn=turn,
+                    elimination_type=seat["elimination_type"], stars=0,
+                )
+                delta["eliminated"].append(as_event_record(etype, data))
+
+            elif etype == "INTEREST":
+                pid = data["player_id"]
+                seat = seats[pid]
+                seat["debt"] = data.get("new_debt", seat["debt"])
+                mark_changed(pid, debt=seat["debt"])
+
+            elif etype == "REPAID":
+                pid = data["player_id"]
+                seat = seats[pid]
+                seat["cash"] = max(0, seat["cash"] - data.get("amount", 0))
+                seat["debt"] = data.get("new_debt", seat["debt"])
+                mark_changed(pid, cash=seat["cash"], debt=seat["debt"])
+
+            elif etype == "TRANSFERRED":
+                amount = data.get("amount", 0)
+                src, dst = seats.get(data["from"]), seats.get(data["to"])
+                if src is not None:
+                    src["cash"] = max(0, src["cash"] - amount)
+                    mark_changed(data["from"], cash=src["cash"])
+                if dst is not None:
+                    dst["cash"] = dst["cash"] + amount
+                    mark_changed(data["to"], cash=dst["cash"])
+
+            elif etype == "BOARD_UPDATED":
+                board = {k: data.get(k, 0) for k in _INITIAL_HAND_TYPES}
+                board_checked += 1
+                computed = {k: 0 for k in _INITIAL_HAND_TYPES}
+                for seat in seats.values():
+                    if seat["status"] != "alive":
+                        continue
+                    for k in _INITIAL_HAND_TYPES:
+                        computed[k] += seat["hand_counts"].get(k, 0)
+                if computed != board:
+                    board_mismatches += 1
+
+            elif etype == "GAME_END":
+                completed = True
+
+            # 未知のイベント種別（LLM_BUDGET_BLOCKED/WAIT_STARTED/ACTION_UNHANDLED等）は
+            # 盤面状態に影響しないため無視する（deny-by-defaultで安全側に倒れる）。
+
+        current_turn = turn
+        board_history.append({"turn": turn, **board})
+        turns_out.append({
+            "turn": turn,
+            "board": dict(board),
+            "alive_count": sum(1 for s in seats.values() if s["status"] == "alive"),
+            "seats_changed": changed,
+            "delta": delta,
+        })
+
+    if config is None:
+        config = GameConfig.dev_small()
+
+    stars_in_play = sum(s["stars"] for s in seats.values() if s["status"] == "alive")
+    stars_exited_frozen = sum(
+        s["stars"] for s in seats.values() if s["status"] == "exited"
+    )
+    # 退出者は退出時点の★を保持表示するため、ゼロサム計算にはstars_removed_totalの
+    # 記録（退出時点の値）を使う。stars_exited_frozenと理論上一致するはずだが、
+    # 別経路で算出しているので突き合わせにも使える。
+    stars_total_expected = config.num_players * config.initial_stars
+
+    return {
+        "seats": [seats[pid] for pid in seat_order],
+        "offers": offers,
+        "board": board,
+        "board_history": board_history,
+        "turns": turns_out,
+        "current_turn": current_turn,
+        "completed": completed,
+        "config": config,
+        "derivation": {
+            "method": "event_fold",
+            "stars_total": stars_total_expected,
+            "stars_in_play": stars_in_play,
+            "stars_removed": stars_removed_total,
+            "stars_zero_sum_ok": (stars_in_play + stars_removed_total) == stars_total_expected,
+            "stars_cross_check": {"checked": stars_checked, "mismatches": stars_mismatches},
+            "hand_cross_check": {"checked": hand_checked, "mismatches": hand_mismatches},
+            "board_cross_check": {"checked": board_checked, "mismatches": board_mismatches},
+        },
+    }
+
+
+def _project_seat(seat: dict[str, Any], *, view: str, game_ended: bool, reveal_identity: bool) -> dict[str, Any]:
+    if view == "god":
+        projected = dict(seat)
+    else:
+        allowed = _PUBLIC_SEAT_POST_GAME_KEYS if game_ended else PUBLIC_SEAT_KEYS
+        projected = {k: v for k, v in seat.items() if k in allowed}
+    if reveal_identity and "identity" in seat:
+        projected["identity"] = seat["identity"]
+    return projected
+
+
+def _project_offer(offer: dict[str, Any], view: str) -> dict[str, Any]:
+    if view == "god":
+        return dict(offer)
+    return {k: v for k, v in offer.items() if k in PUBLIC_OFFER_KEYS}
+
+
+def _project_turn(turn_entry: dict[str, Any], view: str, game_ended: bool) -> dict[str, Any]:
+    if view == "god":
+        return {
+            "turn": turn_entry["turn"],
+            "board": dict(turn_entry["board"]),
+            "alive_count": turn_entry["alive_count"],
+            "seats_changed": {pid: dict(c) for pid, c in turn_entry["seats_changed"].items()},
+            "delta": {k: (list(v) if not isinstance(v, list) else list(v)) for k, v in turn_entry["delta"].items()},
+        }
+
+    seat_keys = _PUBLIC_TURN_SEAT_POST_GAME_KEYS if game_ended else PUBLIC_TURN_SEAT_KEYS
+    seats_changed = {}
+    for pid, changes in turn_entry["seats_changed"].items():
+        projected = {k: v for k, v in changes.items() if k in seat_keys}
+        if projected:
+            seats_changed[pid] = projected
+
+    delta = turn_entry["delta"]
+    return {
+        "turn": turn_entry["turn"],
+        "board": dict(turn_entry["board"]),
+        "alive_count": turn_entry["alive_count"],
+        "seats_changed": seats_changed,
+        "delta": {
+            "offered": list(delta["offered"]),
+            "accepted": list(delta["accepted"]),
+            "withdrawn": list(delta["withdrawn"]),
+            "declined": list(delta["declined"]),
+            "expired": list(delta["expired"]),
+            "resolved": [_project_delta_record(r, view, game_ended) for r in delta["resolved"]],
+            "exited": [_project_delta_record(r, view, game_ended) for r in delta["exited"]],
+            "eliminated": [_project_delta_record(r, view, game_ended) for r in delta["eliminated"]],
+            "rejections": [_project_delta_record(r, view, game_ended) for r in delta["rejections"]],
+        },
+    }
+
+
+def _project_delta_record(record: dict[str, Any], view: str, game_ended: bool) -> dict[str, Any]:
+    """
+    turns[].delta 内の各レコード（MATCH_RESOLVED/PLAYER_EXITED/FORCED_EXIT/TIMEOUT/
+    *_REJECTED由来）を、既存の`_redact_event`（イベント種別ごとのホワイトリスト）に
+    そのまま通して投影する。新しい秘匿ルールを二重管理しないための再利用。
+    """
+    etype = record.get("event_type")
+    data = {k: v for k, v in record.items() if k != "event_type"}
+    redacted = _redact_event({"event_type": etype, "data": data}, view, game_ended)
+    return {"event_type": etype, **redacted["data"]}
+
+
+def board_fingerprint(logs_dir: Path, game_id: str) -> str | None:
+    """
+    `{game_id}_events.jsonl` の現在の状態を表すETag用文字列を返す。
+    ファイルが存在しなければNone。同じ値が返る限り`get_board()`の結果も
+    変わらない（LogCache.fingerprint()と同じmtime+size基準）。
+    """
+    return _cache.fingerprint(logs_dir / f"{game_id}_events.jsonl")
+
+
+def get_board(
+    logs_dir: Path, game_id: str, view: str = "public",
+    from_turn: int = 0, reveal_identity: bool = False,
+) -> dict[str, Any]:
+    """
+    盤面UI向けの畳み込み済み状態を返す（§8.2の公開/秘匿境界に従う）
+
+    Args:
+        view: "public"（既定） または "god"
+        from_turn: この値より大きいturnのみ`turns`に含める（差分ポーリング用。0なら全件）
+        reveal_identity: publicでもseats[].identityを出すか
+            （呼び出し元のviewer/server.pyがVIEWER_REVEAL_IDENTITY環境変数と
+            completedの状態から判断する。view="god"では常に出す）
+    """
+    events = _cache.read_jsonl(logs_dir / f"{game_id}_events.jsonl")
+    if not events:
+        return {"game_id": game_id, "found": False}
+
+    fold = _fold_events(events)
+    game_ended = fold["completed"]
+
+    identities = load_identities(logs_dir, game_id) or {}
+    for seat in fold["seats"]:
+        identity = identities.get(seat["player_id"])
+        if identity is not None:
+            seat["identity"] = identity
+
+    total_turns = fold["config"].total_turns
+    turns_remaining = 0 if game_ended else max(0, total_turns - fold["current_turn"])
+
+    reveal = reveal_identity or view == "god"
+    seats = [
+        _project_seat(s, view=view, game_ended=game_ended, reveal_identity=reveal)
+        for s in fold["seats"]
+    ]
+    offers = {oid: _project_offer(o, view) for oid, o in fold["offers"].items()}
+    turns = [
+        _project_turn(t, view, game_ended)
+        for t in fold["turns"] if t["turn"] > from_turn
+    ]
+
+    return {
+        "game_id": game_id,
+        "found": True,
+        "view": view,
+        "completed": game_ended,
+        "current_turn": fold["current_turn"],
+        "total_turns": total_turns,
+        "turns_remaining": turns_remaining,
+        "rules": _rules_dict(fold["config"], total_turns),
+        "seats": seats,
+        "offers": offers,
+        "board": dict(fold["board"]),
+        "board_history": fold["board_history"],
+        "turns": turns,
+        "derivation": fold["derivation"],
+    }
