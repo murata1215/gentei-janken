@@ -168,3 +168,55 @@ def test_action_unhandled_only_exposes_player_id_and_action_type(client, tmp_pat
         ev for turn in body for ev in turn["events"] if ev["event_type"] == "ACTION_UNHANDLED"
     )
     assert set(unhandled["data"].keys()) == {"player_id", "action_type"}
+
+
+def test_root_serves_viewer(client):
+    resp = client.get("/")
+    assert resp.status_code == 200
+    assert "text/html" in resp.headers["content-type"]
+
+
+def test_default_bind_is_loopback():
+    """公開運用の既定は127.0.0.1（Caddy経由のみ）。0.0.0.0への回帰を検知する。"""
+    assert server.DEFAULT_HOST == "127.0.0.1"
+
+
+def test_default_port_matches_caddy_upstream():
+    """Caddy sites.dのreverse_proxy先とのドリフト検知。変更時はdoc/viewer_operations.mdも直すこと。"""
+    assert server.DEFAULT_PORT == 9027
+
+
+def test_unknown_event_type_data_is_emptied(client, tmp_path):
+    """deny-by-default: ホワイトリスト未列挙のイベント種別はdataを丸ごと落とす"""
+    events = [
+        {"event_type": "GAME_START", "round_num": 0, "data": {"num_players": 1, "total_turns": 5, "initial_loans": {}}},
+        {"event_type": "SOME_NEW_EVENT_TYPE", "round_num": 2,
+         "data": {"secret_field": "should-not-leak"}},
+    ]
+    _write_events(tmp_path, "g1", events)
+    resp = client.get("/api/games/g1/turns?view=public")
+    assert "secret_field" not in resp.text
+    assert "should-not-leak" not in resp.text
+
+
+def test_llm_calls_log_is_not_listed(client, tmp_path):
+    """神視点専用ログ（llm_calls/seat_map）は/api/gamesの一覧に出ない"""
+    _write_events(tmp_path, "g1", _SAMPLE_EVENTS)
+    (tmp_path / "g1_llm_calls.jsonl").write_text('{"prompt": "secret"}\n', encoding="utf-8")
+    (tmp_path / "g1_seat_map.json").write_text('{"P01": "gpt-4"}', encoding="utf-8")
+    resp = client.get("/api/games")
+    body = resp.json()
+    assert [g["game_id"] for g in body] == ["g1"]
+    assert "llm_calls" not in resp.text
+    assert "seat_map" not in resp.text
+
+
+def test_static_mount_rejects_traversal(client):
+    resp = client.get("/static/../../.env")
+    assert resp.status_code in (403, 404)
+
+
+def test_encoded_slash_game_id_is_404(client, tmp_path):
+    _write_events(tmp_path, "g1", _SAMPLE_EVENTS)
+    resp = client.get("/api/games/..%2F..%2Fetc%2Fpasswd/turns")
+    assert resp.status_code == 404

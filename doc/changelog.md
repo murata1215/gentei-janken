@@ -1,5 +1,32 @@
 # Changelog
 
+## 2026-09-26: サイクル1.6: Viewerのweb公開（systemd + Caddy）
+
+観戦Viewer（FastAPI）をdangou-cardと同じ構成（uso8m常駐systemd + Caddyリバースプロキシ）
+でweb公開した。既定ポート9024が`chrome-bookmark.devrelay.io`と衝突していたため9027へ
+変更し、トップページ（`/`）が存在せず404になる欠落も修正した。
+
+- **`viewer/server.py`**: `DEFAULT_HOST`/`DEFAULT_PORT`定数を新設し既定値の単一ソース化
+  （`127.0.0.1`/`9027`。dangou-cardの「code既定9025/本番9023のズレ」の教訓を踏まえ、
+  unitの`Environment=`では上書きしない）。`GET /`を追加（従来`/watch`のみで公開直後の
+  トップページが404だった）。`game_id`パスパラメータに`^[A-Za-z0-9_.\-]+$`の
+  パターン制約を追加（パストラバーサル対策の明示的な塞ぎ込み）。
+- **`tests/test_viewer.py`**: 7件追加（`/`疎通、既定値ドリフト検知、未知イベント種別の
+  deny-by-default、god専用ログ非露出、staticトラバーサル拒否、game_idパストラバーサル404）。
+- **常駐・公開**: `~/.config/systemd/user/gentei-viewer.service`（uso8mユーザー、
+  `127.0.0.1:9027`、Restart=always）を新規作成しenable。神視点トークンは
+  dangou-card同様drop-in（`gentei-viewer.service.d/god-token.conf` →
+  `~/.config/gentei-viewer/god.env`、repo外・0600）で注入。Caddy側
+  （`/etc/caddy/sites.d/gentei-janken-viewer.devrelay.io` → `reverse_proxy localhost:9027`）
+  は`devrelay`プロジェクトへ依頼。dangou-cardと異なり`log_skip`/`handle_errors`は
+  付けない（現行UIにポーリングが無くアクセスログが肥大しないため、placeholder用の
+  devrelayユーザー領域も未整備のため）。
+- **リーク検証**: 実ログ5試合（`logs/llm/*_events.jsonl`）に対し`view=public`で
+  `challenger_hand`/`old_debt`/`final_assets`（試合未終了分）等の秘匿キーが
+  一切出力されないことを実測確認。`final_assets`はGAME_END後のみ公開キーとして
+  現れることを確認（設計どおり）。`*_llm_calls.jsonl`/`*_seat_map.json`は
+  `/api/games`一覧に一切出ないことを確認。
+
 ## 2026-09-26: サイクル1.5: LLM対戦の通電・秘匿の穴閉じ
 
 サイクル1.0の歩く骨格はBot対戦は完動していたが、LLM対戦は構造的に1試合も成立しない

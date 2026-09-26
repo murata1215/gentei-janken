@@ -75,6 +75,17 @@ Viewer APIは既定で `view=public` とし、DM本文・宛先、匿名発言�
 キー名を指しており、`challenger_hand`/`old_debt`/`cash_before`等が`view=public`で丸見えだった）。
 `viewer/log_parser.py::PUBLIC_EVENT_DATA_KEYS` を参照。
 
+## Viewerの公開bind/portは`viewer/server.py`の定数を単一ソースとする
+
+`viewer/server.py` の `DEFAULT_HOST`（`127.0.0.1`）・`DEFAULT_PORT`（`9027`）が既定値の唯一の正。
+systemd unit（`~/.config/systemd/user/gentei-viewer.service`）には `Environment=VIEWER_HOST` /
+`Environment=VIEWER_PORT` を書かないこと。dangou-card で「code既定9025 / 本番unit上書き9023」が
+ズレて設定の実体が2箇所に分散した教訓を踏まえる（`engine/config.py` の `GameConfig` 単一ソース化
+ルールと同じ思想）。ポートを変更する場合は次の3箇所を同時に直す:
+`viewer/server.py` の `DEFAULT_PORT` → Caddy `sites.d/gentei-janken-viewer.devrelay.io` の
+`reverse_proxy` 先（root権限、devrelayプロジェクト経由） → `tests/test_viewer.py::test_default_port_matches_caddy_upstream`。
+公開運用の手順は `doc/viewer_operations.md` を正本とする。
+
 ## LLMコストは常に `usage_cost()` 経由で算出する
 
 `llm/costing.py` の `usage_cost()` / `worst_case_cost()` はキャッシュ割引・thinking差分課金に

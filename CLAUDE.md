@@ -37,6 +37,6 @@ uv run python scripts/simulate.py --games 1000  # 1000試合シミュレーシ�
 | `llm/` | LLMアダプタ・エージェント（6社対応） |
 | `tests/` | 受け入れテスト + Bot/シミュレーション/LLMテスト |
 | `scripts/` | ドライラン・シミュレーション・LLM試験スクリプト |
-| `viewer/` | 観戦WebUI（FastAPI, 127.0.0.1:9024） |
+| `viewer/` | 観戦WebUI（FastAPI, 127.0.0.1:9027） |
 | `doc/` | 仕様書 |
 | `logs/` | JSONLイベントログ・シミュレーション結果出力先 |

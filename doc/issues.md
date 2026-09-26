@@ -33,6 +33,19 @@
 - [x] 実LLM課金トライアルでMATCH_RESOLVED実測確認（$0.0149、6人×20ターンで5件）
 - [x] テスト5ファイル新規63件（game_loop/prompt_builder/response_parser/cot/viewer）
 
+## Viewerのweb公開（サイクル1.6・進行中）
+
+- [x] server.pyにDEFAULT_HOST/DEFAULT_PORT定数を新設（既定値の単一ソース化、9024→9027）
+- [x] `GET /`ルート追加（従来`/watch`のみでトップページが404だった穴を閉じた）
+- [x] game_idパスパラメータにパストラバーサル対策の明示的パターン制約を追加
+- [x] tests/test_viewer.py 7件追加（20件PASS）
+- [x] systemd（`~/.config/systemd/user/gentei-viewer.service`）常駐・enable済み
+- [x] 神視点トークンのdrop-in注入（`god-token.conf` + repo外`god.env`）
+- [x] 実ログ5試合でview=publicの秘匿情報リーク検証（クリーン確認済み）
+- [x] Caddy公開（`gentei-janken-viewer.devrelay.io` → `localhost:9027`）— devrelayプロジェクトへ依頼、reload完了。
+      `https://gentei-janken-viewer.devrelay.io/` 200・god view無トークン403を実測確認
+- [x] doc/viewer_operations.md（公開運用の正本）を新規作成
+
 ## Step 2以降（次サイクル）
 
 - [ ] 契約型A〜Dの本実装（発行料・状態機械・違反判定）
@@ -43,4 +56,6 @@
 - [ ] §12.2 Botシミュレーションで未決事項を検証・決定
 - [ ] build_action_prompt()にreasoning/emotionの要求を追加するか判断
       （配線済みだが現状プロンプトが要求していないため実測では常に空）
-- [ ] systemd（gentei-viewer.service）・Caddy公開
+- [ ] Viewer UIの盤面化（現行はJSON羅列の最小フロント。dangou-card相当の見た目にする）
+- [ ] Viewer UIのgodトークンをsessionStorage化・state取得へのview引数付与
+      （現状GODモードにしてもstateサマリはpublicのまま。フェーズ2）

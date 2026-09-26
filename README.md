@@ -49,9 +49,12 @@ bash scripts/check_trial.sh
 
 ## 観戦ビューア
 
+公開URL: https://gentei-janken-viewer.devrelay.io/（uso8m常駐systemd + Caddy。運用手順は
+`doc/viewer_operations.md` 参照）
+
 ```bash
-VIEWER_PORT=9024 uv run python -m viewer
-curl http://127.0.0.1:9024/api/games
+uv run python -m viewer
+curl http://127.0.0.1:9027/api/games
 ```
 
 ## プロジェクト構成

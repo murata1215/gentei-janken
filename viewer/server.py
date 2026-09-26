@@ -2,8 +2,8 @@
 観戦ビューア FastAPI サーバー
 
 環境変数で設定可能:
-  VIEWER_HOST        バインドアドレス（既定: 0.0.0.0）
-  VIEWER_PORT        ポート（既定: 9024）
+  VIEWER_HOST        バインドアドレス（既定: 127.0.0.1）
+  VIEWER_PORT        ポート（既定: 9027）
   VIEWER_ROOT_PATH   サブパス配信用（既定: 空）
   VIEWER_LOG_ROOT    ログディレクトリ（既定: logs/llm）
   VIEWER_TOKEN       簡易認証トークン（未設定: 認証なし）
@@ -19,18 +19,28 @@ import secrets
 from pathlib import Path
 from typing import Optional
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, HTTPException, Path as PathParam, Query, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from viewer.log_parser import get_game_state, get_round_states, list_games
 
+# --- 既定値の単一ソース ---
+# 変更する場合は Caddy sites.d の reverse_proxy 先と doc/viewer_operations.md も
+# 必ず同時に更新すること（tests/test_viewer.py でドリフトを検知する）。
+DEFAULT_HOST = "127.0.0.1"
+DEFAULT_PORT = 9027
+
+# game_id はログファイル名の一部として使われるため、パストラバーサル対策として
+# 英数字・アンダースコア・ドット・ハイフンのみを許可する。
+GAME_ID_PATTERN = r"^[A-Za-z0-9_.\-]+$"
+
 # --- 環境変数による設定 ---
 DEFAULT_LOGS_DIR = Path(__file__).resolve().parent.parent / "logs" / "llm"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
-HOST = os.environ.get("VIEWER_HOST", "0.0.0.0")
-PORT = int(os.environ.get("VIEWER_PORT", "9024"))
+HOST = os.environ.get("VIEWER_HOST", DEFAULT_HOST)
+PORT = int(os.environ.get("VIEWER_PORT", str(DEFAULT_PORT)))
 ROOT_PATH = os.environ.get("VIEWER_ROOT_PATH", "")
 LOGS_DIR = Path(os.environ.get("VIEWER_LOG_ROOT", str(DEFAULT_LOGS_DIR)))
 TOKEN = os.environ.get("VIEWER_TOKEN", "")
@@ -71,6 +81,12 @@ def check_view(request: Request, view: str) -> str:
     return view
 
 
+@app.get("/")
+async def index(_=Depends(check_token)):
+    """観戦ビューア本体（トップページ）"""
+    return FileResponse(str(STATIC_DIR / "index.html"))
+
+
 @app.get("/watch")
 async def watch(_=Depends(check_token)):
     """観戦ビューア本体"""
@@ -91,14 +107,22 @@ async def api_games(_=Depends(check_token)):
 
 @app.get("/api/games/{game_id}/state")
 async def api_game_state(
-    game_id: str, request: Request, view: str = Query("public"), _=Depends(check_token),
+    request: Request,
+    game_id: str = PathParam(..., pattern=GAME_ID_PATTERN),
+    view: str = Query("public"),
+    _=Depends(check_token),
 ):
     """試合の現在状態サマリを返す（§8.2の公開/秘匿境界に従う）"""
     return get_game_state(LOGS_DIR, game_id, view=check_view(request, view))
 
 
 @app.get("/api/games/{game_id}/turns")
-async def api_turns(game_id: str, request: Request, view: str = Query("public"), _=Depends(check_token)):
+async def api_turns(
+    request: Request,
+    game_id: str = PathParam(..., pattern=GAME_ID_PATTERN),
+    view: str = Query("public"),
+    _=Depends(check_token),
+):
     """ターン別の盤面状況を返す（§8.2の公開/秘匿境界に従う）"""
     return get_round_states(LOGS_DIR, game_id, view=check_view(request, view))
 
