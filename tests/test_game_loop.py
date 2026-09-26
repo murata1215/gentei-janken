@@ -185,3 +185,61 @@ def test_board_updated_event_logged_every_turn():
     assert len(board_events) == 3  # total_turns=3
     for e in board_events:
         assert set(e.data.keys()) == {"ROCK", "SCISSORS", "PAPER"}
+
+
+# --- opponents（§8.2: ★・初期借入額・対戦成績は公開情報、サイクル1.8） ---
+
+def test_build_visible_state_includes_opponents_sorted_by_stars():
+    game = make_game(num_players=3)
+    game.players["P01"] = make_player("P01", stars=3)
+    game.players["P02"] = make_player("P02", stars=5)
+    game.players["P03"] = make_player("P03", stars=1)
+    state = game._build_visible_state("P01", 1)
+    opponents = state["opponents"]
+    assert [o["player_id"] for o in opponents] == ["P02", "P03"]
+    assert opponents[0]["stars"] == 5
+    assert opponents[0]["initial_loan"] == 1_000_000
+
+
+def test_build_visible_state_opponents_excludes_self_and_dead():
+    game = make_game(num_players=3)
+    game.players["P01"] = make_player("P01")
+    game.players["P02"] = make_player("P02", is_alive=False)
+    game.players["P03"] = make_player("P03")
+    state = game._build_visible_state("P01", 1)
+    ids = [o["player_id"] for o in state["opponents"]]
+    assert "P01" not in ids  # 自分は含まない
+    assert "P02" not in ids  # 脱落済みは含まない
+    assert ids == ["P03"]
+
+
+def test_build_visible_state_keeps_alive_player_ids_for_bots():
+    """bots/aggressor_bot.py・draw_alliance_bot.pyが参照するキーを消さない（回帰防止）"""
+    game = make_game(num_players=2)
+    game.players["P01"] = make_player("P01")
+    game.players["P02"] = make_player("P02")
+    state = game._build_visible_state("P01", 1)
+    assert state["alive_player_ids"] == ["P02"]
+
+
+def test_record_match_result_updates_win_loss_draw():
+    game = make_game(num_players=2)
+    game.players["P01"] = make_player("P01")
+    game.players["P02"] = make_player("P02")
+    game._record_match_result("P01", "P02", "challenger_win")
+    game._record_match_result("P02", "P01", "draw")
+    state = game._build_visible_state("P02", 1)
+    p01_stats = next(o for o in state["opponents"] if o["player_id"] == "P01")
+    assert p01_stats["wins"] == 1
+    assert p01_stats["losses"] == 0
+    assert p01_stats["draws"] == 1
+
+
+def test_opponent_stats_omit_cash_debt_and_hand():
+    """手札の中身・現金・借金は§8.2秘匿情報なのでopponentsに含めない"""
+    game = make_game(num_players=2)
+    game.players["P01"] = make_player("P01")
+    game.players["P02"] = make_player("P02", cash=999, debt=999)
+    state = game._build_visible_state("P01", 1)
+    keys = set(state["opponents"][0].keys())
+    assert keys == {"player_id", "stars", "initial_loan", "wins", "losses", "draws"}

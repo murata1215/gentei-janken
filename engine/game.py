@@ -27,8 +27,8 @@ from engine.matches import (
 )
 from engine.models import (
     Action, Contract, ExitAction, MatchAcceptAction, MatchDeclineAction, MatchOffer,
-    MatchOfferAction, MatchWithdrawAction, PassAction, PlayerState, RepayAction,
-    TransferAction, WaitAction,
+    MatchOfferAction, MatchOutcome, MatchWithdrawAction, PassAction, PlayerState,
+    RepayAction, TransferAction, WaitAction,
 )
 from engine.negotiation import PlayerAgent
 from engine.player import can_pay, can_repay_now, create_player, pay, receive, repay_debt
@@ -51,6 +51,10 @@ class Game:
         self.offers: dict[str, MatchOffer] = {}
         self.contracts: list[Contract] = []
         """TODO（次サイクル）: 型A〜Dの実処理が入るまでは常に空リスト"""
+        self._match_record: dict[str, dict[str, int]] = {}
+        """player_id -> {"wins","losses","draws"}（§8.2「対戦の組み合わせと勝敗」は
+        公開情報のため、他プレイヤーへの表示にも使う。MatchOfferには結果が残らない
+        （resolve_match()はMatchResultを都度生成するだけ）ため、ここに積算する。"""
         self._offer_counter = 0
         self._waiting: dict[str, dict[str, Any]] = {}
         """player_id -> {"until_turn": int|None, "wake_on_event": bool}（§5.2 待機）"""
@@ -180,10 +184,33 @@ class Game:
             "min_turns_to_clear_hand": len(player.cards) * 2,
             "offers_incoming": incoming,
             "offers_outgoing": outgoing,
+            # alive_player_idsはbots/（aggressor_bot.py・draw_alliance_bot.py）が
+            # 参照しているため残す。opponentsはLLM向けの★・成績付き詳細版。
             "alive_player_ids": [p.player_id for p in alive if p.player_id != player_id],
+            "opponents": self._opponent_public_stats(player_id),
             "projected_rank": rank,
             "projected_rank_total": rank_total,
         }
+
+    def _opponent_public_stats(self, player_id: str) -> list[dict[str, Any]]:
+        """
+        他プレイヤーの公開情報を★降順で返す（§8.2: ★の数・初期借入額は公開情報）
+
+        対戦の組み合わせと勝敗も§8.2で公開情報だが、個々の対戦ではなく
+        通算成績（wins/losses/draws）として渡す。手札の中身・現金・借金は含めない。
+        """
+        alive = [p for p in self.players.values() if p.is_alive and p.player_id != player_id]
+        ordered = sorted(alive, key=lambda p: (-p.stars, p.player_id))
+        stats = []
+        for p in ordered:
+            record = self._match_record.get(p.player_id, {"wins": 0, "losses": 0, "draws": 0})
+            stats.append({
+                "player_id": p.player_id,
+                "stars": p.stars,
+                "initial_loan": p.initial_loan,
+                "wins": record["wins"], "losses": record["losses"], "draws": record["draws"],
+            })
+        return stats
 
     # --- ステップ3: 行動の処理 ---
 
@@ -381,7 +408,22 @@ class Game:
             self.players[offer.challenger_id] = new_challenger
             self.players[offer.opponent_id] = new_opponent
             self.offers[offer_id] = new_offer
+            self._record_match_result(result.challenger_id, result.opponent_id, result.outcome)
             self.logger.log("MATCH_RESOLVED", turn, "reveal", data=result.model_dump())
+
+    def _record_match_result(self, challenger_id: str, opponent_id: str, outcome: MatchOutcome) -> None:
+        """対戦成績を積算する（§8.2の公開情報。opponents一覧の表示に使う）"""
+        c_record = self._match_record.setdefault(challenger_id, {"wins": 0, "losses": 0, "draws": 0})
+        o_record = self._match_record.setdefault(opponent_id, {"wins": 0, "losses": 0, "draws": 0})
+        if outcome == "challenger_win":
+            c_record["wins"] += 1
+            o_record["losses"] += 1
+        elif outcome == "opponent_win":
+            o_record["wins"] += 1
+            c_record["losses"] += 1
+        else:
+            c_record["draws"] += 1
+            o_record["draws"] += 1
 
     # --- ステップ6: 強制退場 ---
 

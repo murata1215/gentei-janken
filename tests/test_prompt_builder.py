@@ -87,6 +87,44 @@ def test_opponents_section_handles_empty():
     assert "P0" not in section
 
 
+def test_opponents_section_shows_stars_and_record_when_provided():
+    """サイクル1.8: opponentsが渡されたら★・対戦成績のテーブルを表示する（穴1の解消）"""
+    section = build_opponents_section(_visible_state(opponents=[
+        {"player_id": "P03", "stars": 5, "initial_loan": 1_000_000, "wins": 3, "losses": 1, "draws": 0},
+        {"player_id": "P07", "stars": 1, "initial_loan": 5_000_000, "wins": 0, "losses": 2, "draws": 0},
+    ]))
+    assert "P03" in section and "★5個" in section and "3勝1敗0分" in section
+    assert "P07" in section and "★1個" in section and "0勝2敗0分" in section
+
+
+def test_opponents_section_shows_no_record_when_no_matches():
+    section = build_opponents_section(_visible_state(opponents=[
+        {"player_id": "P12", "stars": 3, "initial_loan": 1_000_000, "wins": 0, "losses": 0, "draws": 0},
+    ]))
+    assert "対戦0回" in section
+
+
+def test_opponents_section_empty_list_shows_none():
+    section = build_opponents_section(_visible_state(opponents=[]))
+    assert "(なし)" in section
+
+
+def test_personal_notice_shows_turn_margin():
+    """サイクル1.8: 余裕ターン数の表示（穴2の代替。sayを入れない設計判断の根拠）"""
+    cards = [Card(hand=Hand.ROCK, card_id=f"P01_ROCK_{i}") for i in range(1, 5)]  # 4枚
+    player = make_player("P01", cards=cards)
+    notice = build_personal_notice(player, 10, _visible_state())
+    # config.total_turns=20, turn=10 -> remaining=10, min_turns=8 -> margin=2
+    assert "余裕2ターン" in notice
+
+
+def test_personal_notice_warns_when_margin_negative():
+    cards = [Card(hand=Hand.ROCK, card_id=f"P01_ROCK_{i}") for i in range(1, 9)]  # 8枚 -> min_turns=16
+    player = make_player("P01", cards=cards)
+    notice = build_personal_notice(player, 10, _visible_state())  # remaining=10 -> margin=-6
+    assert "生還は不可能" in notice
+
+
 def test_action_prompt_declares_action_type_key_and_examples():
     prompt = build_action_prompt()
     assert "action_type" in prompt

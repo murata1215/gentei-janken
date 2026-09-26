@@ -15,3 +15,6 @@ API_MAX_RETRIES = 2        # 429/5xx/タイムアウト時の最大リトライ�
 
 # --- 修正4: 交渉空回り削減 ---
 AUTO_PASS_ON_NO_NEWS = True  # 新規メッセージがない場合に自動pass（LLMコールしない）
+
+# --- サイクル1.8: LLMの記憶（memory）配線 ---
+MEMORY_MAX_LENGTH = 500  # 次ターンへ引き継ぐメモの上限文字数（プロンプト肥大防止）

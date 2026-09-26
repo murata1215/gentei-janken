@@ -1,5 +1,41 @@
 # Changelog
 
+## 2026-09-26: サイクル1.8: LLM対戦を成立させる基盤整備（★可視化・memory配線）
+
+ユーザーから「ゲーム開始できるのかな」と聞かれ調査したところ、既存LLM戦の実測が
+pass率70.8%・対戦0〜5件（4本中3本が対戦0件・全員TIMEOUT）と、ゲームとして
+機能していないことが判明した。原因を「①他プレイヤーの★がプロンプトに無い
+（`build_opponents_section`がID羅列のみ）②毎ターン記憶を失う（`memory`フィールドが
+定義されながら参照ゼロ）」の2点と特定し、DM・取引の通電（Stage 1/2）に進む前に
+まずこれを解消した。
+
+- **`engine/game.py`**: `_build_visible_state`に`opponents`
+  （★・初期借入額・対戦成績、§8.2公開情報）を追加。`_record_match_result()`で
+  対戦成績を通算積算（`MatchOffer`には結果が残らないため）。既存の
+  `alive_player_ids`はbots/aggressor_bot.py・draw_alliance_bot.pyが参照するため
+  そのまま温存し、`opponents`は追加のみ。
+- **`llm/prompt_builder.py`**: `build_opponents_section`を★降順・勝敗数付きテーブル
+  表示に書き換え。`build_personal_notice`に「カードを使い切るのに最低限必要な
+  ターン数（残り{X}ターン → 余裕{Y}ターン）」を追加、余裕がマイナスなら
+  「生還は不可能」と明記。`say`（ターンを消費しない一言）を入れる代わりの設計判断
+  （§5.1「1ターン1アクション」の逐語を守りつつ、pass の機会費用を可視化する）。
+- **`llm/response_parser.py`**: `extract_memory()`を新設。`llm/llm_agent.py`に
+  `self._memory`を持たせ、LLM応答の`memory`フィールドを次ターンのプロンプト冒頭
+  「## 前ターンまでのあなたのメモ」として再注入する。reasoning/emotionと同じ
+  抽出経路だが扱いは正反対（reasoningは永久に秘匿、memoryは意図的に本人へ差し戻す）。
+- **`scripts/analyze_actions.py`**（新規）: `*_llm_calls.jsonl`のresponse_textから
+  action_type分布・pass率を、`*_events.jsonl`からイベント種別件数を集計する。
+  以降のStage 1/2の受け入れ基準判定に使う。
+- **テスト**: 19件新規（`test_game_loop.py`のopponents検証、`test_prompt_builder.py`
+  の★テーブル・余裕表示、`test_response_parser.py`のextract_memory、新規
+  `test_llm_agent_memory.py`のプロンプト再注入検証）。全243件PASS。
+- **実課金トライアル3本**（`L6,L6,L6,L6,L6,L6`・20ターン・$0.072）で実測:
+  pass率が70.8%→**5.9%（中央値、12分の1）**、MATCH_RESOLVEDが5件→**19件
+  （中央値、3.8倍）**。memoryは120回中116回（97%）で使用され、利息ターンや
+  借金返済計画を含む具体的な申し送りが次ターンに引き継がれることを確認した。
+  （20ターン設定では手札12枚を使い切るのに最低24ターン必要なため生還0人は
+  想定どおり。120ターンの本番では問題にならない）
+
 ## 2026-09-26: サイクル1.7: Viewerの盤面UI化（dangou-card相当へ）
 
 サイクル1.6で公開したViewerは98行のJSON羅列スタブだった。dangou-card相当の

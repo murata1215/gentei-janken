@@ -71,6 +71,7 @@
 - [ ] §12.2 Botシミュレーションで未決事項を検証・決定
 - [ ] build_action_prompt()にreasoning/emotionの要求を追加するか判断
       （配線済みだが現状プロンプトが要求していないため実測では常に空）
+
 ## Viewerの盤面UI化（サイクル1.7・完了）
 
 - [x] `GET /api/games/{id}/board`新設（server側でイベント畳み込み→席・申込索引・
@@ -93,3 +94,26 @@
 - [x] 本番反映・実URLでリーク検証（5試合でcash/debt/hand_*/card_idパターン0件）
 - [ ] Phase 4（別サイクル）: ライブポーリング、★移動演出、ペア強調、コストモーダル、
       感情の本配線、実況席の復活
+
+## LLM対戦を成立させる基盤整備（サイクル1.8・完了、Stage 0）
+
+実測でLLM戦がpass率70.8%・対戦0〜5件と機能していなかった原因（★不可視・履歴ゼロ）を
+解消する準備段階。DM・取引の通電（Stage 1/2、後続サイクル）の前提。
+
+- [x] `engine/game.py::_build_visible_state`に`opponents`（★・初期借入額・対戦成績、
+      §8.2公開情報）を追加。`_record_match_result`で通算成績を積算。既存の
+      `alive_player_ids`はbots/が参照するため温存
+- [x] `llm/prompt_builder.py::build_opponents_section`を★降順・成績付きテーブル表示に
+      書き換え（opponents未提供時はID羅列にフォールバック、後方互換）
+- [x] `build_personal_notice`に「余裕ターン数」表示を追加（余裕マイナス時は
+      「生還は不可能」と明記）。`say`（ターン非消費の発言）を入れない代わりの設計
+- [x] `llm/response_parser.py::extract_memory()`新設、`llm/llm_agent.py`に
+      `self._memory`を持たせ次ターン冒頭へ再注入（`llm/phase2_schema.py`の`memory`
+      フィールドが定義されながら全リポジトリで参照ゼロだった穴を解消）
+- [x] `scripts/analyze_actions.py`新規（`*_llm_calls.jsonl`からaction_type分布・
+      pass率、`*_events.jsonl`からイベント件数を集計。各Stageの受け入れ基準を
+      数値判定するために使う）
+- [x] テスト19件新規、全243件PASS
+- [x] 実課金トライアル3本（L6×6・20ターン、$0.072）で実測: **pass率70.8%→5.9%
+      （12分の1）、MATCH_RESOLVED 5件→19件中央値（3.8倍）**。memoryは120回中116回
+      （97%）で使用され、具体的な計画（利息ターン・借金返済時期等）を記憶し続けた

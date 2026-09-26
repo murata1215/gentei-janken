@@ -6,10 +6,15 @@ ValidationErrorがParseError以外の形で漏れ、1回の不正応答で試合
 の再発防止線。extract_json()の4分岐と_convert_action()の異常系を検証する。
 """
 
+import json
+
 import pytest
 
 from engine.models import DmAction, MatchOfferAction, PassAction, RepayAction, TransferAction
-from llm.response_parser import ParseError, extract_json, extract_reasoning_and_emotion, parse_action
+from llm.constants import MEMORY_MAX_LENGTH
+from llm.response_parser import (
+    ParseError, extract_json, extract_memory, extract_reasoning_and_emotion, parse_action,
+)
 
 
 # --- extract_json(): dangou-cardから移植した4分岐 ---
@@ -173,3 +178,36 @@ def test_reasoning_never_reaches_the_action_object():
     assert "reasoning" not in dumped
     assert "emotion" not in dumped
     assert "内心の理由" not in str(dumped)
+
+
+def test_extract_memory_returns_string():
+    text = '{"action_type": "pass", "memory": "P07は約束を守った"}'
+    assert extract_memory(text) == "P07は約束を守った"
+
+
+def test_extract_memory_none_when_absent():
+    assert extract_memory('{"action_type": "pass"}') is None
+
+
+def test_extract_memory_none_when_blank():
+    assert extract_memory('{"action_type": "pass", "memory": "   "}') is None
+
+
+def test_extract_memory_handles_unparsable_text():
+    assert extract_memory("JSONではない文章") is None
+
+
+def test_extract_memory_truncated_to_max_length():
+    long_text = "あ" * (MEMORY_MAX_LENGTH + 100)
+    text = json.dumps({"action_type": "pass", "memory": long_text})
+    result = extract_memory(text)
+    assert result is not None
+    assert len(result) == MEMORY_MAX_LENGTH
+
+
+def test_memory_never_reaches_the_action_object():
+    """memoryはAction本体には乗らない（LLMAgentの内部状態にのみ保持する設計）"""
+    text = '{"action_type": "pass", "memory": "秘密のメモ"}'
+    action = parse_action(text, "P01")
+    dumped = action.model_dump()
+    assert "memory" not in dumped

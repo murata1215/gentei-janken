@@ -29,7 +29,9 @@ from llm.prompt_builder import (
     build_action_prompt, build_board_section, build_opponents_section,
     build_personal_notice, build_system_prompt,
 )
-from llm.response_parser import ParseError, extract_reasoning_and_emotion, make_correction_message, parse_action
+from llm.response_parser import (
+    ParseError, extract_memory, extract_reasoning_and_emotion, make_correction_message, parse_action,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +69,13 @@ class LLMAgent(PlayerAgent):
         self.total_calls = 0
         self.valid_json_count = 0
         self.action_correction_count = 0
+        self._memory: str = ""
+        """
+        次ターンへ引き継ぐ自分自身へのメモ（任意フィールド、§5.2の一部ではないが
+        LLM応答のmemoryキーから毎ターン更新する）。エンジンの状態には一切触れず、
+        このエージェントのプロンプトにのみ再注入する（rules/project.md「reasoning
+        は秘匿」と同じくAction/イベント/他プレイヤーには構造的に一切渡らない）。
+        """
 
     def choose_loan(self, config: GameConfig) -> int:
         """
@@ -92,12 +101,16 @@ class LLMAgent(PlayerAgent):
 
     def act(self, player_state: PlayerState, turn: int, visible_state: dict) -> Action:
         """1ターンのアクションを選択する（§5.1 ステップ2）"""
-        base_prompt = "\n\n".join([
+        sections = []
+        if self._memory:
+            sections.append(f"## 前ターンまでのあなたのメモ\n{self._memory}")
+        sections += [
             build_personal_notice(player_state, turn, visible_state),
             build_opponents_section(visible_state),
             build_board_section(visible_state.get("board", {})),
             build_action_prompt(),
-        ])
+        ]
+        base_prompt = "\n\n".join(sections)
         prompt = base_prompt
 
         for attempt in range(MAX_RETRIES + 1):
@@ -106,6 +119,9 @@ class LLMAgent(PlayerAgent):
             if text is None:
                 # API呼び出し自体が失敗（予算ブロック・アダプタエラー）→安全側にpass
                 return PassAction(player_id=player_state.player_id)
+            new_memory = extract_memory(text)
+            if new_memory is not None:
+                self._memory = new_memory
             try:
                 action = parse_action(text, player_state.player_id)
                 self.valid_json_count += 1

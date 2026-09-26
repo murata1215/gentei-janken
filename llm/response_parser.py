@@ -24,6 +24,7 @@ from engine.models import (
     MatchWithdrawAction, PassAction, RepayAction, TradeAcceptAction, TradeProposeAction,
     TradeRejectAction, TradeWithdrawAction, TransferAction, WaitAction,
 )
+from llm.constants import MEMORY_MAX_LENGTH
 from llm.phase2_schema import REQUIRED_FIELDS_BY_ACTION_TYPE
 
 logger = logging.getLogger(__name__)
@@ -125,6 +126,25 @@ def extract_reasoning_and_emotion(text: str) -> tuple[str | None, str | None]:
     normalized = normalize_emotion(dict(data))
     emotion = normalized.get("emotion")
     return reasoning, emotion
+
+
+def extract_memory(text: str) -> str | None:
+    """
+    LLM応答から次ターンへ引き継ぐメモ（memoryフィールド、任意）を取り出す
+
+    reasoning/emotionと同じ抽出経路を使うが、扱いは正反対である点に注意:
+    reasoningは永久に秘匿（llm_loggerのみ）、memoryは秘匿情報ではなく
+    「次ターンの自分自身への申し送り」として意図的にプロンプトへ差し戻す
+    （llm/llm_agent.py::LLMAgent._memory）。他プレイヤーの可視状態・イベント・
+    プロンプトには一切渡らない（本人の次ターンのプロンプトにのみ再注入される）。
+    """
+    data = extract_json(text)
+    if data is None:
+        return None
+    memory = data.get("memory")
+    if not isinstance(memory, str) or not memory.strip():
+        return None
+    return memory.strip()[:MEMORY_MAX_LENGTH]
 
 
 def make_correction_message(error: ParseError) -> str:

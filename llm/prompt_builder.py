@@ -81,10 +81,16 @@ def build_personal_notice(player: PlayerState, turn: int, visible_state: dict) -
     for hand_value in ("ROCK", "SCISSORS", "PAPER"):
         ids = hand_groups.get(hand_value, [])
         lines.append(f"  - {hand_value}: {', '.join(ids) if ids else '(なし)'}")
+    min_turns = len(player.cards) * 2
+    margin = remaining - min_turns
+    margin_note = (
+        f"（残り{remaining}ターン → 余裕{margin}ターン）" if margin >= 0
+        else f"（残り{remaining}ターン → **{-margin}ターン不足。このままでは生還は不可能**）"
+    )
     lines += [
         f"- 手札合計: {len(player.cards)}枚（予約中を含む）",
         f"- ★: {player.stars}個",
-        f"- カードを使い切るのに最低限必要なターン数: {len(player.cards) * 2}",
+        f"- カードを使い切るのに最低限必要なターン数: {min_turns}{margin_note}",
         "- 自分の現在の順位の見込み（清算後の資産で計算）: "
         f"{visible_state.get('projected_rank', '?')}位 / {visible_state.get('projected_rank_total', '?')}人",
         f"- 届いている対戦申込（{len(incoming)}件。match_acceptまたはmatch_declineでoffer_idを指定する）:",
@@ -108,11 +114,24 @@ def build_personal_notice(player: PlayerState, turn: int, visible_state: dict) -
 
 def build_opponents_section(visible_state: dict) -> str:
     """
-    対戦の申込先・送金先として指定できるプレイヤーIDの一覧
+    対戦の申込先・送金先として指定できるプレイヤーの一覧（§8.2: ★・初期借入額・
+    対戦の組み合わせと勝敗は公開情報）
 
-    engine/game.py::_build_visible_state の alive_player_ids
-    （場に残っている自分以外の全員。★の数と同じく公開情報、§8.2）をそのまま列挙する。
+    engine/game.py::_build_visible_state の opponents（★降順、対戦成績付き）を
+    テーブル表示する。opponentsが無い呼び出し元（旧テスト・簡易呼び出し）向けに
+    alive_player_idsのみのID羅列にフォールバックする。
     """
+    opponents = visible_state.get("opponents")
+    if opponents is not None:
+        if not opponents:
+            return "## 場に残っている他プレイヤー（★の数は公開情報 §8.2）\n(なし)"
+        lines = ["## 場に残っている他プレイヤー（★の数・対戦成績は公開情報 §8.2）"]
+        for o in opponents:
+            total = o["wins"] + o["losses"] + o["draws"]
+            record = f"{o['wins']}勝{o['losses']}敗{o['draws']}分" if total else "対戦0回"
+            lines.append(f"- {o['player_id']}: ★{o['stars']}個 ／ {record}")
+        return "\n".join(lines)
+
     alive = visible_state.get("alive_player_ids", [])
     if not alive:
         return "## 場に残っている他プレイヤー\n(なし)"
@@ -170,6 +189,11 @@ def build_action_prompt() -> str:
         field_note = f"必須フィールド: {', '.join(fields)}" if fields else "他のフィールドは不要"
         lines.append(f'- "{action_type}": {ACTION_DESCRIPTIONS_JA[action_type]}（{field_note}）')
     lines.append("例（対戦の申込）: " + json.dumps(_ACTION_EXAMPLE, ensure_ascii=False))
+    lines.append(
+        '任意で"memory"キーに次ターンの自分への申し送りを書いてよい（相手の傾向・'
+        "気づいたこと等。次ターンのあなたのプロンプト冒頭にそのまま再提示される。"
+        "あなたは毎ターン状態を忘れるため、重要なことはここに書いておくこと）。"
+    )
     lines.append(build_objective_reminder())
     return "\n".join(lines)
 
