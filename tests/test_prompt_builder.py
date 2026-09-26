@@ -131,7 +131,7 @@ def test_action_prompt_declares_action_type_key_and_examples():
     for action_type in IMPLEMENTED_ACTION_TYPES:
         assert f'"{action_type}"' in prompt
     # 未実装のアクション種はプロンプトに出さない（課金・ターンの無駄になるため）
-    for unimplemented in ("trade_propose", "contract_propose", "bounty_post"):
+    for unimplemented in ("contract_propose", "bounty_post"):
         assert f'"{unimplemented}"' not in prompt
 
 

@@ -1,5 +1,51 @@
 # Changelog
 
+## 2026-09-26: サイクル2.0: 即時取引の通電
+
+`engine/trades.py`の決済コア（`can_settle_trade()`/`settle_trade()`）はサイクル1.5から
+実装済みだったが、Game側の提案ライフサイクル管理（提案・受諾・拒否・取消・失効）が
+無くACTION_UNHANDLEDに落ちていた。DM・全体発言（サイクル1.9）に続き、この穴を埋めた。
+
+- **`engine/models.py`**: `TradeStatus`に`"rejected"`を追加。`TradeRejectAction`が
+  既に定義されているのに状態として表現できない既存の型の穴を解消した。
+- **`engine/trades.py`**: `make_trade_id(turn, proposer_id, counter)`を追加。
+  `engine/matches.py::make_offer_id`と同形式の決定的ID生成にした
+  （dangou-cardの`uuid.uuid4().hex[:8]`は不採用。ログの再現性とテストの
+  書きやすさを優先）。
+- **`engine/config.py`**: `trade_ttl_turns`を追加（§7.1「提案した翌ターンの終わり
+  まで」）。
+- **`engine/game.py`**: 4ハンドラ（propose/accept/reject/withdraw）と
+  `_expire_trades()`を追加。`_build_visible_state`に`trades_incoming`/
+  `trades_outgoing`/`trade_notices`、`_should_wake`に取引提案到着条件を追加。
+  dangou-cardの3つの運用ノウハウのうち「受諾時の再検証」だけを採用した
+  （`can_settle_trade()`の1行呼び出しで済む）。「ブロードキャスト提案」
+  「枠消費は成立ベース」は不採用——§5.1「1ターン1アクション」がそもそも
+  1ターンに複数提案を出せない自然な上限になっており、dangou-card固有の
+  ラウンド制（1ラウンド内で複数人に同時提案）の産物だったため。
+- **`viewer/log_parser.py`**: `TRADE_PROPOSED`は当事者IDも落とす判断をした
+  （§8.2の公開区分に列挙されているのは「取引の成立」のみで「提案」自体は
+  列挙が無い。対戦の`MATCH_OFFERED`とは非対称になるが、仕様書の列挙に
+  忠実に従った——rules/project.md冒頭「実装より仕様書が優先する」）。
+  **最大の落とし穴**: `_fold_events`の★ゼロサム検算は取引で★が動くことを
+  知らないと静かにmismatchを出し続ける。`TRADE_ACCEPTED`のdataに
+  `stars_moved`（public）/`cards_moved`/`cash_moved`/`give`/`receive`（god）を
+  追加し、foldで反映した。card_idの命名規則（`{player_id}_{HAND}_{n}`）から
+  手の種類を逆算し、`hand_counts`も正確に更新するようにした。
+- **`viewer/static/index.html`**: 状況パネルに「🔁 取引（§7.1）」カードを追加。
+  Playwrightで実機確認し、public/godとも当事者・★移動のみが表示され
+  カードの中身・現金は出ないことを確認した。
+- **テスト**: 23件新規（`test_trades_flow.py`新規14件、`test_viewer_fold.py`に
+  取引後の★ゼロサム検算テスト、`test_viewer_secrecy.py`・`test_stars.py`に
+  追加）。全302件PASS。
+- **`scripts/run_stage_trial.sh`**（新規）: 複数シードのトライアルを一括起動・
+  完了待ち・分析までを1コマンドで行うスクリプト。ユーザーから「テストは
+  こちらで回すのでスクリプトだけ用意してほしい」との指摘を受けて作成した
+  ——Claude側がトライアル完了待ちの自作ループでセッションタイムアウトに
+  巻き込まれる事故がサイクル1.8・1.9で2回発生したため、以降トライアル実行は
+  人間の対話シェルに委ねる運用に変更した。
+- 実課金トライアルは本コミット時点で未実行（`bash scripts/run_stage_trial.sh s2
+  <seed1> <seed2> <seed3>`で実行予定）。
+
 ## 2026-09-26: サイクル1.9: DM・全体発言・匿名通信の通電
 
 ユーザーから「DM・契約・取引は談合カードから持ってきていないのか」と指摘され精査した

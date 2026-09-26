@@ -165,6 +165,55 @@ def build_messages_section(visible_state: dict) -> str:
     return "\n".join(lines)
 
 
+def _format_asset_offer(offer) -> str:
+    """AssetOffer（カード・★・現金の任意組み合わせ）を短い日本語に整形する"""
+    parts = []
+    if offer.card_ids:
+        parts.append(f"カード{len(offer.card_ids)}枚（{', '.join(offer.card_ids)}）")
+    if offer.stars:
+        parts.append(f"★{offer.stars}個")
+    if offer.cash:
+        parts.append(f"{offer.cash}円")
+    return " + ".join(parts) if parts else "（何も無し）"
+
+
+def build_trades_section(visible_state: dict) -> str:
+    """
+    届いている取引提案・自分が出している提案・直近の取引通知を表示する（§7.1）
+
+    engine/game.py::_build_visible_state の trades_incoming/trades_outgoing/
+    trade_notices は既にTradeProposalオブジェクトのリストとして渡される
+    （中身は§8.2「取引の中身は秘匿」の例外——当事者本人には常に見せてよい）。
+    """
+    incoming = visible_state.get("trades_incoming", [])
+    outgoing = visible_state.get("trades_outgoing", [])
+    notices = visible_state.get("trade_notices", [])
+    lines = [
+        "## 取引（§7.1: カード・★・現金を任意に組み合わせて交換できる）",
+        f"- 届いている取引提案（{len(incoming)}件。trade_accept/trade_rejectでtrade_idを指定する）:",
+    ]
+    if incoming:
+        for t in incoming:
+            lines.append(
+                f"  - trade_id={t.trade_id} 相手={t.proposer_id} ／ "
+                f"相手が出す: {_format_asset_offer(t.give)} ／ "
+                f"あなたが出す: {_format_asset_offer(t.receive)}"
+            )
+    else:
+        lines.append("  - (なし)")
+    lines.append(f"- 自分が出している取引提案（{len(outgoing)}件。trade_withdrawで取り下げられる）:")
+    if outgoing:
+        for t in outgoing:
+            lines.append(f"  - trade_id={t.trade_id} 相手={t.target_id} status={t.status}")
+    else:
+        lines.append("  - (なし)")
+    if notices:
+        lines.append("- 直近の取引通知:")
+        for n in notices:
+            lines.append(f"  - T{n['turn']}: 取引{n['trade_id']}は相手の資産不足で不成立になった")
+    return "\n".join(lines)
+
+
 def build_board_section(board: dict[str, int]) -> str:
     """残数掲示板セクションを構築する（§8.1）"""
     return (
@@ -188,6 +237,10 @@ ACTION_DESCRIPTIONS_JA: dict[str, str] = {
     "dm": "特定の相手に1対1でメッセージを送る（対戦の事前調整・取引の打診等。本文は当事者以外に見えない）",
     "broadcast": "全員に公開でメッセージを送る（同盟の呼びかけ・裏切りの告発等。発信者は公開される）",
     "anonymous_broadcast": "発信者を伏せて全員にメッセージを送る（有料・1ターン上限あり。具体額は本セクション末尾に明記）",
+    "trade_propose": "カード・★・現金を組み合わせた交換を提案する（一方的な譲渡も可。翌ターンの終わりまでに受諾されなければ失効）",
+    "trade_accept": "届いている取引提案を受諾する（受諾時点で資産が足りなければ不成立になるだけで、脱落はしない）",
+    "trade_reject": "届いている取引提案を断る",
+    "trade_withdraw": "自分が出した取引提案を取り下げる",
 }
 """IMPLEMENTED_ACTION_TYPES に対応する日本語の短い説明"""
 
@@ -198,6 +251,14 @@ _ACTION_EXAMPLE = {
     "card_id": "P01_ROCK_1",
 }
 """build_action_prompt() が末尾に添える具体例（match_offer）"""
+
+_TRADE_ACTION_EXAMPLE = {
+    "action_type": "trade_propose",
+    "target_id": "P07",
+    "give": {"card_ids": ["P01_ROCK_1"], "stars": 0, "cash": 0},
+    "receive": {"card_ids": [], "stars": 0, "cash": 800000},
+}
+"""build_action_prompt() が末尾に添えるtrade_proposeの具体例（give/receiveの形を示す）"""
 
 
 def build_action_prompt(config: GameConfig | None = None) -> str:
@@ -228,6 +289,8 @@ def build_action_prompt(config: GameConfig | None = None) -> str:
         f"1ターンに{cfg.anonymous_message_limit_per_turn}通まで。発信者は誰にも分からない）"
     )
     lines.append("例（対戦の申込）: " + json.dumps(_ACTION_EXAMPLE, ensure_ascii=False))
+    lines.append("例（取引の提案。give=自分が渡す、receive=自分が受け取る）: "
+                 + json.dumps(_TRADE_ACTION_EXAMPLE, ensure_ascii=False))
     lines.append(
         '任意で"memory"キーに次ターンの自分への申し送りを書いてよい（相手の傾向・'
         "気づいたこと等。次ターンのあなたのプロンプト冒頭にそのまま再提示される。"

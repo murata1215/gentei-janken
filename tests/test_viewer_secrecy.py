@@ -189,3 +189,54 @@ def test_anonymous_broadcast_god_view_reveals_sender(client, tmp_path):
     body = resp.json()
     anon = next(ev for turn in body for ev in turn["events"] if ev["event_type"] == "ANONYMOUS_BROADCAST_SENT")
     assert anon["data"]["sender"] == "P02"
+
+
+# --- サイクル2.0: 即時取引のpublic投影テスト ---
+
+_TRADE_EVENTS = [
+    {"event_type": "GAME_START", "round_num": 0,
+     "data": {"num_players": 2, "total_turns": 10, "initial_loans": {"P01": 1_000_000, "P02": 1_000_000}}},
+    {"event_type": "TRADE_PROPOSED", "round_num": 1,
+     "data": {"trade_id": "T_1_P01_1", "proposer_id": "P01", "target_id": "P02"}},
+    {"event_type": "TRADE_ACCEPTED", "round_num": 2,
+     "data": {
+         "trade_id": "T_1_P01_1", "proposer_id": "P01", "target_id": "P02",
+         "stars_moved": {"P01": -1, "P02": 1},
+         "cards_moved": {"P01": 1, "P02": -1},
+         "cash_moved": {"P01": -800000, "P02": 800000},
+         "give": {"card_ids": [], "stars": 1, "cash": 0},
+         "receive": {"card_ids": ["P02_ROCK_1"], "stars": 0, "cash": 800000},
+     }},
+]
+
+
+def test_trade_proposed_public_omits_proposer_and_target(client, tmp_path):
+    """§8.2は「取引の成立（当事者2人）」のみ公開区分に列挙。提案自体の当事者は出さない"""
+    _write_events(tmp_path, "g1", _TRADE_EVENTS)
+    body = client.get("/api/games/g1/turns?view=public").json()
+    proposed = next(ev for turn in body for ev in turn["events"] if ev["event_type"] == "TRADE_PROPOSED")
+    assert proposed["data"] == {"trade_id": "T_1_P01_1"}
+
+
+def test_trade_accepted_public_shows_parties_and_stars_only(client, tmp_path):
+    """成立は当事者2人が公開（§8.2）。★の移動も結果として見える（§7.1）。中身は秘匿"""
+    _write_events(tmp_path, "g1", _TRADE_EVENTS)
+    body = client.get("/api/games/g1/turns?view=public").json()
+    accepted = next(ev for turn in body for ev in turn["events"] if ev["event_type"] == "TRADE_ACCEPTED")
+    assert accepted["data"] == {
+        "trade_id": "T_1_P01_1", "proposer_id": "P01", "target_id": "P02",
+        "stars_moved": {"P01": -1, "P02": 1},
+    }
+    assert "cards_moved" not in accepted["data"]
+    assert "cash_moved" not in accepted["data"]
+    assert "give" not in accepted["data"]
+    assert "receive" not in accepted["data"]
+
+
+def test_trade_accepted_god_view_shows_full_contents(client, tmp_path):
+    _write_events(tmp_path, "g1", _TRADE_EVENTS)
+    resp = client.get("/api/games/g1/turns?view=god", headers={"X-Viewer-God-Token": "secret-god-token"})
+    body = resp.json()
+    accepted = next(ev for turn in body for ev in turn["events"] if ev["event_type"] == "TRADE_ACCEPTED")
+    assert accepted["data"]["cards_moved"] == {"P01": 1, "P02": -1}
+    assert "P02_ROCK_1" in str(accepted["data"]["receive"])

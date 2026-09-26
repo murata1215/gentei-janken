@@ -71,6 +71,7 @@
     <div class="sit-card" id="card-board"><h4>📋 残数掲示板（§8.1）</h4></div>
     <div class="sit-card" id="card-stars"><h4>★ 勢力図</h4></div>
     <div class="sit-card" id="card-finance"><h4>💰 財務（神視点）</h4></div>
+    <div class="sit-card" id="card-trades"><h4>🔁 取引（§7.1）</h4></div>
     <div class="sit-card" id="card-exits"><h4>🚪 退出・脱落</h4></div>
     <div class="sit-card" id="card-raw"><h4>📜 このターンの生ログ</h4></div>
   </div>
@@ -617,6 +618,7 @@ function renderTurn(animate) {
   renderMatchLane(snap);
   renderStars(snap);
   renderFinance(snap);
+  renderTrades(snap);
   renderExits(snap);
   renderRawLog(snap);
   renderMessages(snap);
@@ -783,6 +785,34 @@ function renderFinance(snap) {
     .map(s => `<div class="sit-row"><b>${s.player_id}</b> 現金${yen(s.cash)} ／ 借金 <span class="debt-val">${yen(s.debt)}</span></div>`)
     .join("") || "<div class='sit-muted'>生存者なし</div>";
   el.innerHTML = `<h4>💰 財務（神視点）</h4>${rows}`;
+}
+
+function renderTrades(snap) {
+  const el = document.getElementById("card-trades");
+  const delta = snap.delta;
+  const trades = (delta && delta.trades) || [];
+  if (!trades.length) {
+    el.innerHTML = "<h4>🔁 取引（§7.1）</h4><p class='sit-muted'>このターンは無し</p>";
+    return;
+  }
+  const rows = trades.map(t => {
+    if (t.event_type === "TRADE_PROPOSED") {
+      return `<div class="sit-row sit-muted">📝 取引提案（${escapeHtml(t.trade_id)}）</div>`;
+    }
+    if (t.event_type === "TRADE_ACCEPTED") {
+      const stars = t.stars_moved || {};
+      const starsText = Object.entries(stars).filter(([, v]) => v).map(([pid, v]) => `${pid} ★${v > 0 ? "+" : ""}${v}`).join(" / ");
+      return `<div class="sit-row sit-win">🤝 ${escapeHtml(t.proposer_id)} ⇄ ${escapeHtml(t.target_id)} 成立${starsText ? `（${starsText}）` : ""}</div>`;
+    }
+    if (t.event_type === "TRADE_FAILED") {
+      return `<div class="sit-row sit-elim">⚠ 取引不成立（資産不足、脱落なし）</div>`;
+    }
+    if (t.event_type === "TRADE_REJECTED") return `<div class="sit-row sit-muted">✗ 取引を拒否</div>`;
+    if (t.event_type === "TRADE_WITHDRAWN") return `<div class="sit-row sit-muted">↩ 取引を取り下げ</div>`;
+    if (t.event_type === "TRADE_EXPIRED") return `<div class="sit-row sit-muted">⌛ 取引が失効</div>`;
+    return "";
+  }).join("");
+  el.innerHTML = `<h4>🔁 取引（§7.1）</h4>${rows}`;
 }
 
 function renderExits(snap) {

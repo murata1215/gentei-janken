@@ -143,7 +143,7 @@ class AssetOffer(BaseModel):
     cash: int = 0
 
 
-TradeStatus = Literal["pending", "accepted", "expired", "withdrawn"]
+TradeStatus = Literal["pending", "accepted", "expired", "withdrawn", "rejected"]
 
 
 class TradeProposal(BaseModel):

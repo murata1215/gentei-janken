@@ -29,12 +29,14 @@ from engine.messages import can_send_anonymous, format_message_body, make_messag
 from engine.models import (
     Action, AnonymousBroadcastAction, BroadcastAction, Contract, DmAction, ExitAction,
     MatchAcceptAction, MatchDeclineAction, MatchOffer, MatchOfferAction, MatchOutcome,
-    MatchWithdrawAction, Message, PassAction, PlayerState, RepayAction, TransferAction,
+    MatchWithdrawAction, Message, PassAction, PlayerState, RepayAction, TradeAcceptAction,
+    TradeProposal, TradeProposeAction, TradeRejectAction, TradeWithdrawAction, TransferAction,
     WaitAction,
 )
 from engine.negotiation import PlayerAgent
 from engine.player import can_pay, can_repay_now, create_player, pay, receive, repay_debt
 from engine.rng import GameRng
+from engine.trades import can_settle_trade, make_trade_id, settle_trade
 
 
 class Game:
@@ -72,6 +74,14 @@ class Game:
         """player_id -> 最後にact()が呼ばれたターン（プロンプト表示窓の外でも
         自分宛未読DMを出すための判定に使う。待機中は更新されず、寝ている間の
         DMは全て「未読」のまま蓄積する）"""
+        self.trades: dict[str, TradeProposal] = {}
+        """即時取引の提案（§7.1）。engine/trades.pyの決済コアはサイクル1.5から
+        実装済みで、Game側は提案ライフサイクル（提案・受諾・拒否・取消・失効）
+        の管理のみを担う"""
+        self._trade_counter = 0
+        self._trade_notices: dict[str, list[dict[str, Any]]] = {}
+        """player_id -> 個別通知（不成立等）。§7.1「受諾時点で資産不足なら不成立、
+        脱落はしない」を通知する経路（契約のnotice機構と同じ思想だが契約自体は未実装）"""
 
     # --- セットアップ（§2.1/§2.2） ---
 
@@ -129,6 +139,8 @@ class Game:
 
         # 申込の失効判定（§4.3）は毎ターン末に行う
         self._expire_offers(turn)
+        # 取引提案の失効判定（§7.1）
+        self._expire_trades(turn)
 
         # 残数掲示板の更新（§8.1: 毎ターンの処理が終わった時点で更新する。公開情報）
         alive = [p for p in self.players.values() if p.is_alive]
@@ -160,7 +172,6 @@ class Game:
         意図的に起床条件から除外する——1人がbroadcastしただけで待機中の全員が
         起きると、待機機構（LLM呼び出し削減）の目的が真逆になる（§5.2は
         「DM・対戦申込・取引提案」とだけ列挙しており全体発言は含まれない）。
-        取引提案（trades_incoming）はサイクル2.0で追加する。
         """
         until_turn = wait_state.get("until_turn")
         if until_turn is not None and turn >= until_turn:
@@ -169,6 +180,8 @@ class Game:
             if visible_state.get("offers_incoming"):
                 return True
             if visible_state.get("dms_unread"):
+                return True
+            if visible_state.get("trades_incoming"):
                 return True
         return False
 
@@ -198,6 +211,15 @@ class Game:
                     if o.challenger_id == player_id and o.status in ("pending", "accepted")]
         rank, rank_total = self._projected_rank(player_id)
         messages, dms_unread = self._visible_messages_for(player_id, turn)
+        trades_incoming = [t for t in self.trades.values()
+                           if t.target_id == player_id and t.status == "pending"]
+        trades_outgoing = [t for t in self.trades.values()
+                           if t.proposer_id == player_id and t.status == "pending"]
+        # messagesと同じ「削除しない・窓で絞る」方式。act()を呼ばずに_build_visible_state
+        # だけ呼ばれるケース（_should_wakeの判定時）でも消費されない（pop方式だと
+        # 待機中に読まれないまま消えてしまう）。
+        window_start = turn - self.config.message_prompt_window_turns
+        trade_notices = [n for n in self._trade_notices.get(player_id, []) if n["turn"] >= window_start]
         return {
             "config": self.config,
             "turn": turn,
@@ -216,6 +238,9 @@ class Game:
             "projected_rank_total": rank_total,
             "messages": messages,
             "dms_unread": dms_unread,
+            "trades_incoming": trades_incoming,
+            "trades_outgoing": trades_outgoing,
+            "trade_notices": trade_notices,
         }
 
     def _visible_messages_for(self, player_id: str, turn: int) -> tuple[list[dict[str, Any]], bool]:
@@ -307,7 +332,19 @@ class Game:
         if isinstance(action, AnonymousBroadcastAction):
             self._handle_anonymous_broadcast(turn, player, action)
             return
-        # TODO（次サイクル）: trade_* / contract_* / bounty_* はまだ処理しない。
+        if isinstance(action, TradeProposeAction):
+            self._handle_trade_propose(turn, player, action)
+            return
+        if isinstance(action, TradeAcceptAction):
+            self._handle_trade_accept(turn, player, action)
+            return
+        if isinstance(action, TradeRejectAction):
+            self._handle_trade_reject(turn, player, action)
+            return
+        if isinstance(action, TradeWithdrawAction):
+            self._handle_trade_withdraw(turn, player, action)
+            return
+        # TODO（次サイクル）: contract_* / bounty_* はまだ処理しない。
         self.logger.log("ACTION_UNHANDLED", turn, "resolve", data={
             "player_id": player_id, "action_type": action.type,
         })
@@ -389,6 +426,129 @@ class Game:
         self.logger.log("ANONYMOUS_BROADCAST_SENT", turn, "resolve", data={
             "message": body, "turn": turn, "sender": player.player_id,
         })
+
+    # --- 即時取引（§7.1、サイクル2.0） ---
+
+    def _handle_trade_propose(self, turn: int, player: PlayerState, action: TradeProposeAction) -> None:
+        """
+        取引を提案する（§7.1）
+
+        受諾時点での資産確認が本来の判定タイミングだが（§7.1「受諾の時点でどちらか
+        が出す資産を持っていなければ不成立」）、明らかに出せない提案が相手の
+        アクション枠を無駄に食うのを防ぐため、提案時点でも自分の分だけ早期チェックする
+        （これは受諾時の再検証の代替ではなく、追加の親切）。
+        """
+        target = self.players.get(action.target_id)
+        if target is None or target.player_id == player.player_id or not target.is_alive:
+            self.logger.log("TRADE_PROPOSE_REJECTED", turn, "resolve", data={
+                "player_id": player.player_id, "reason": "invalid_target",
+            })
+            return
+        if not action.give.card_ids and not action.give.stars and not action.give.cash \
+                and not action.receive.card_ids and not action.receive.stars and not action.receive.cash:
+            self.logger.log("TRADE_PROPOSE_REJECTED", turn, "resolve", data={
+                "player_id": player.player_id, "reason": "empty_trade",
+            })
+            return
+        if not can_settle_trade(player, player, action.give, action.give):
+            # 自分がgiveを出せるかだけを軽く確認する（receiveは相手の持ち物なので
+            # ここでは判定不能。厳密な検証はaccept時にcan_settle_trade()で行う）
+            self.logger.log("TRADE_PROPOSE_REJECTED", turn, "resolve", data={
+                "player_id": player.player_id, "reason": "cannot_afford_give",
+            })
+            return
+        if any(t.proposer_id == player.player_id and t.target_id == action.target_id and t.status == "pending"
+               for t in self.trades.values()):
+            self.logger.log("TRADE_PROPOSE_REJECTED", turn, "resolve", data={
+                "player_id": player.player_id, "reason": "duplicate_trade",
+            })
+            return
+        self._trade_counter += 1
+        trade_id = make_trade_id(turn, player.player_id, self._trade_counter)
+        self.trades[trade_id] = TradeProposal(
+            trade_id=trade_id, proposer_id=player.player_id, target_id=action.target_id,
+            turn_proposed=turn, give=action.give, receive=action.receive,
+        )
+        # §8.2: 取引の「提案」は§8.2公開区分に明記が無く「観戦者のみ」区分に落ちる
+        # （公開区分は「取引の成立（当事者2人）」のみ。対戦のMATCH_OFFEREDとは
+        # 非対称になるが、仕様書の列挙に忠実に従った結果——rules/project.md冒頭
+        # 「実装より仕様書が優先する」）。当事者IDもpublicには出さない。
+        self.logger.log("TRADE_PROPOSED", turn, "resolve", data={
+            "trade_id": trade_id, "proposer_id": player.player_id, "target_id": action.target_id,
+        })
+
+    def _handle_trade_accept(self, turn: int, player: PlayerState, action: TradeAcceptAction) -> None:
+        trade = self.trades.get(action.trade_id)
+        if trade is None or trade.status != "pending" or trade.target_id != player.player_id:
+            self.logger.log("TRADE_ACCEPT_REJECTED", turn, "resolve", data={
+                "player_id": player.player_id, "trade_id": action.trade_id, "reason": "not_found",
+            })
+            return
+        proposer = self.players.get(trade.proposer_id)
+        if proposer is None or not proposer.is_alive:
+            self.trades[trade.trade_id] = trade.model_copy(update={"status": "expired"})
+            self.logger.log("TRADE_EXPIRED", turn, "resolve", data={"trade_id": trade.trade_id})
+            return
+        if not can_settle_trade(proposer, player, trade.give, trade.receive):
+            # §7.1: 受諾時点でどちらかが資産不足なら不成立とし、脱落はさせない
+            self.trades[trade.trade_id] = trade.model_copy(update={"status": "expired"})
+            self._trade_notices.setdefault(proposer.player_id, []).append(
+                {"turn": turn, "trade_id": trade.trade_id, "reason": "assets_unavailable"})
+            self._trade_notices.setdefault(player.player_id, []).append(
+                {"turn": turn, "trade_id": trade.trade_id, "reason": "assets_unavailable"})
+            self.logger.log("TRADE_FAILED", turn, "resolve", data={
+                "trade_id": trade.trade_id, "reason": "assets_unavailable",
+            })
+            return
+        new_proposer, new_target = settle_trade(proposer, player, trade.give, trade.receive)
+        self.players[proposer.player_id] = new_proposer
+        self.players[player.player_id] = new_target
+        self.trades[trade.trade_id] = trade.model_copy(update={"status": "accepted"})
+        stars_delta = trade.receive.stars - trade.give.stars  # proposer視点の★純増減
+        # public: 取引の成立（当事者2人）は公開情報（§8.2）。★の移動も★の数自体が
+        # 公開情報なので結果として見える（§7.1）。cards_moved/cash_movedはgod専用
+        # （viewer/log_parser.pyのホワイトリストに列挙しないことで自動的に落ちる）。
+        self.logger.log("TRADE_ACCEPTED", turn, "resolve", data={
+            "trade_id": trade.trade_id, "proposer_id": proposer.player_id, "target_id": player.player_id,
+            "stars_moved": {proposer.player_id: stars_delta, player.player_id: -stars_delta},
+            "cards_moved": {
+                proposer.player_id: len(trade.receive.card_ids) - len(trade.give.card_ids),
+                player.player_id: len(trade.give.card_ids) - len(trade.receive.card_ids),
+            },
+            "cash_moved": {
+                proposer.player_id: trade.receive.cash - trade.give.cash,
+                player.player_id: trade.give.cash - trade.receive.cash,
+            },
+            "give": trade.give.model_dump(), "receive": trade.receive.model_dump(),
+        })
+
+    def _handle_trade_reject(self, turn: int, player: PlayerState, action: TradeRejectAction) -> None:
+        trade = self.trades.get(action.trade_id)
+        if trade is None or trade.status != "pending" or trade.target_id != player.player_id:
+            return
+        self.trades[trade.trade_id] = trade.model_copy(update={"status": "rejected"})
+        self.logger.log("TRADE_REJECTED", turn, "resolve", data={"trade_id": trade.trade_id})
+
+    def _handle_trade_withdraw(self, turn: int, player: PlayerState, action: TradeWithdrawAction) -> None:
+        trade = self.trades.get(action.trade_id)
+        if trade is None or trade.status != "pending" or trade.proposer_id != player.player_id:
+            return
+        self.trades[trade.trade_id] = trade.model_copy(update={"status": "withdrawn"})
+        self.logger.log("TRADE_WITHDRAWN", turn, "resolve", data={"trade_id": trade.trade_id})
+
+    def _expire_trades(self, turn: int) -> None:
+        """取引提案の失効判定（§7.1: 提案した翌ターンの終わりまで）
+
+        資産移動は一切発生しない（取引は対戦のような予約をしないため、
+        engine/trades.pyのdocstring参照）。statusの更新とログのみ。
+        """
+        for trade_id, trade in list(self.trades.items()):
+            if trade.status != "pending":
+                continue
+            if turn < trade.turn_proposed + self.config.trade_ttl_turns:
+                continue
+            self.trades[trade_id] = trade.model_copy(update={"status": "expired"})
+            self.logger.log("TRADE_EXPIRED", turn, "resolve", data={"trade_id": trade_id})
 
     def _handle_repay(self, turn: int, player: PlayerState, action: RepayAction) -> None:
         """任意返済（§2.4/§7.5）。その場で決済する"""

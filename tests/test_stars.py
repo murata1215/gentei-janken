@@ -54,3 +54,22 @@ def test_exit_removes_floor_stars_from_play():
     p = make_player("P01", stars=3, cash=1_000_000, debt=0, cards=[])
     updated = settle_exit(p, config, turn=50)
     assert updated.stars == 0  # 生還時も手元の★は場から取り除かれる（§6.2ステップ4）
+
+
+def test_trade_conserves_star_sum():
+    """
+    即時取引（サイクル2.0）で★が動いても総和は不変（rules/project.md「★はゼロサム資産」）。
+
+    viewer/log_parser.py::_fold_events もTRADE_ACCEPTEDのstars_movedを反映して
+    derivation.stars_zero_sum_okを維持する（tests/test_viewer_fold.pyで別途検証）。
+    """
+    from engine.models import AssetOffer
+    from engine.trades import settle_trade
+
+    p1 = make_player("P01", stars=3)
+    p2 = make_player("P02", stars=3)
+    give = AssetOffer(stars=1)
+    receive = AssetOffer(cash=100_000)
+    new_p1, new_p2 = settle_trade(p1, p2, give, receive)
+    assert new_p1.stars + new_p2.stars == 6
+    assert new_p1.stars == 2 and new_p2.stars == 4

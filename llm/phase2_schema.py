@@ -100,16 +100,16 @@ IMPLEMENTED_ACTION_TYPES = (
     "match_offer", "match_accept", "match_decline", "match_withdraw",
     "exit",
     "dm", "broadcast", "anonymous_broadcast",
+    "trade_propose", "trade_accept", "trade_reject", "trade_withdraw",
 )
 """
 engine/game.py::_apply_actionが実処理するアクション種のみ。
 
-trade_*/contract_*/bounty_* はまだACTION_UNHANDLED（素通り）なので、LLMに
-選ばせても課金とターンの無駄になるだけである。llm/prompt_builder.py::
-build_action_prompt() はこの集合だけを提示する（即時取引・契約の本実装が
-入るサイクルでここを拡張する）。
+contract_*/bounty_* はまだACTION_UNHANDLED（素通り）なので、LLMに選ばせても
+課金とターンの無駄になるだけである。llm/prompt_builder.py::build_action_prompt()
+はこの集合だけを提示する（契約の本実装が入るサイクルでここを拡張する）。
 
-dm/broadcast/anonymous_broadcast はサイクル1.9で追加（§5.2通信の実処理化）。
+dm/broadcast/anonymous_broadcast はサイクル1.9、trade_*はサイクル2.0で追加。
 """
 
 # --- action_type ごとの必須フィールド（response_parser.py が参照する） ---

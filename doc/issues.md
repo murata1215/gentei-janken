@@ -156,3 +156,40 @@ wait/wake_on_eventの非同期起床）に合わせて設計し直した。
       対戦をしないか」という具体的な協調の呼びかけが自発的に発生した。
       DM・匿名通信は0件（20ターンでは全員が同じ危機に直面するため全体呼びかけが
       優先された可能性。120ターンの本番で変化するか要観察）
+
+## 即時取引の通電（サイクル2.0・実装完了、トライアル実行待ち、Stage 2）
+
+`engine/trades.py`の決済コア（`can_settle_trade()`/`settle_trade()`）はサイクル1.5から
+実装済みだったため、今回はGame側の提案ライフサイクル管理（提案・受諾・拒否・取消・失効）
+のみを実装した。
+
+- [x] `engine/models.py`: `TradeStatus`に`"rejected"`を追加（`TradeRejectAction`が
+      存在するのに状態を表現できない既存の型の穴を解消）
+- [x] `engine/trades.py`: `make_trade_id(turn, proposer_id, counter)`追加
+      （`make_offer_id`と同形式の決定的ID。dangou-cardのuuid方式は不採用）
+- [x] `engine/config.py`: `trade_ttl_turns`追加（§7.1: 提案翌ターンの終わりまで）
+- [x] `engine/game.py`: `_handle_trade_propose`/`_handle_trade_accept`/
+      `_handle_trade_reject`/`_handle_trade_withdraw`/`_expire_trades`を追加。
+      `_build_visible_state`に`trades_incoming`/`trades_outgoing`/`trade_notices`、
+      `_should_wake`に取引提案到着条件を追加
+- [x] dangou-cardの3つの運用ノウハウのうち「受諾時の再検証」のみ採用（`can_settle_trade()`
+      1行で済む）。「ブロードキャスト提案」「枠消費は成立ベース」は不採用
+      （§5.1「1ターン1アクション」がそもそも複数提案を出せない自然な上限になっている）
+- [x] `llm/prompt_builder.py::build_trades_section`新規、`IMPLEMENTED_ACTION_TYPES`に
+      `trade_propose`/`trade_accept`/`trade_reject`/`trade_withdraw`を追加
+- [x] `viewer/log_parser.py`: `TRADE_PROPOSED`は当事者IDも落とす（§8.2の公開区分に
+      「取引の成立」しか列挙が無く「提案」の当事者は明記されていないため、対戦の
+      MATCH_OFFEREDとは非対称だが仕様書の列挙に忠実に従った）。`TRADE_ACCEPTED`に
+      `stars_moved`を追加し`_fold_events`で反映（**取引で★が動いてもderivationの
+      ゼロサム検算が壊れないことをtest_viewer_fold.pyで確認**。card_idから手の種類を
+      逆算してhand_countsも正確に更新）
+- [x] `viewer/static/index.html`: 状況パネルに「🔁 取引（§7.1）」カードを追加。
+      Playwrightで実機確認（public/godとも当事者・★移動のみ表示、コンソールエラー0件）
+- [x] テスト23件新規（`test_trades_flow.py`新規14件、`test_viewer_fold.py`・
+      `test_viewer_secrecy.py`・`test_stars.py`に追加）、全302件PASS
+- [x] `scripts/run_stage_trial.sh`新規: 複数シードのトライアルを一括起動・完了待ち・
+      `analyze_actions.py`分析までを1コマンドで行う（人間の対話シェルから実行する想定。
+      Claude側がトライアル完了待ちループでセッションタイムアウトに巻き込まれた
+      教訓——サイクル1.8/1.9で2回発生——を踏まえ、以降トライアル実行は人間に委ねる）
+- [ ] 実課金トライアル3本（`bash scripts/run_stage_trial.sh s2 <seed1> <seed2> <seed3>`）
+      は未実行。TRADE_PROPOSED≥2件・TRADE_ACCEPTED≥1件を実測で確認する

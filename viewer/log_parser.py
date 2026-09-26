@@ -68,6 +68,20 @@ PUBLIC_EVENT_DATA_KEYS: dict[str, set[str]] = {
     # senderをここに列挙しないことで自動的に落とす（実送信者はgod専用）。
     "ANONYMOUS_BROADCAST_SENT": {"message", "turn"},
     "ANON_BROADCAST_REJECTED": {"player_id", "reason"},
+    # 取引の「提案」自体は§8.2の公開区分に列挙が無い（公開区分は「取引の成立
+    # （当事者2人）」のみ）ため、trade_idのみ公開しproposer_id/target_idは
+    # 落とす（対戦のMATCH_OFFEREDとは非対称だが仕様書の列挙に忠実に従う）。
+    "TRADE_PROPOSED": {"trade_id"},
+    "TRADE_PROPOSE_REJECTED": {"player_id", "reason"},
+    # 成立は当事者2人が公開（§8.2）。★の移動は★の数自体が公開情報なので結果的に
+    # 見える（§7.1）。cards_moved/cash_moved/give/receiveはgod専用
+    # （ここに列挙しないことで自動的に落ちる）。
+    "TRADE_ACCEPTED": {"trade_id", "proposer_id", "target_id", "stars_moved"},
+    "TRADE_ACCEPT_REJECTED": {"player_id", "trade_id", "reason"},
+    "TRADE_REJECTED": {"trade_id"},
+    "TRADE_WITHDRAWN": {"trade_id"},
+    "TRADE_EXPIRED": {"trade_id"},
+    "TRADE_FAILED": {"trade_id", "reason"},
 }
 
 _PLAYER_EXITED_POST_GAME_KEYS = PUBLIC_EVENT_DATA_KEYS["PLAYER_EXITED"] | {"final_assets"}
@@ -94,9 +108,13 @@ PUBLIC_REASON_CODES: set[str] = {
     "insufficient_stars",         # engine/exit_rules.py: can_exit
     "cannot_clear_debt",          # engine/exit_rules.py: can_exit
     "unfulfilled_obligation",     # engine/exit_rules.py: can_exit
-    "invalid_target",             # engine/game.py: DM_REJECTED
+    "invalid_target",             # engine/game.py: DM_REJECTED/TRADE_PROPOSE_REJECTED
     "empty_message",              # engine/game.py: DM_REJECTED/BROADCAST_REJECTED/ANON_BROADCAST_REJECTED
     "anon_limit_reached",         # engine/game.py: ANON_BROADCAST_REJECTED
+    "empty_trade",                # engine/game.py: TRADE_PROPOSE_REJECTED
+    "cannot_afford_give",         # engine/game.py: TRADE_PROPOSE_REJECTED
+    "duplicate_trade",            # engine/game.py: TRADE_PROPOSE_REJECTED
+    "assets_unavailable",         # engine/game.py: TRADE_FAILED（§7.1: 受諾時点の資産不足）
 }
 
 # 注意: `message`（DM本文・全体発言・匿名通信の本文）は`reason`と違って値の
@@ -332,6 +350,20 @@ _PUBLIC_TURN_SEAT_POST_GAME_KEYS = PUBLIC_TURN_SEAT_KEYS | {"final_assets"}
 _INITIAL_HAND_TYPES = ("ROCK", "SCISSORS", "PAPER")
 
 
+def _hand_type_from_card_id(card_id: str) -> str | None:
+    """
+    card_id（例: "P01_ROCK_1"）から手の種類を取り出す（engine/cards.py::create_deck
+    の命名規則 f"{player_id}_{hand.value}_{i}" に依存）。
+
+    取引でカードが移動しても genteiはcard_idをリネームしない（衝突しない設計。
+    engine/models.py::Card docstring参照）ため、この解析は取引後も有効。
+    """
+    parts = card_id.split("_")
+    if len(parts) >= 2 and parts[-2] in _INITIAL_HAND_TYPES:
+        return parts[-2]
+    return None
+
+
 def _resolve_rules(game_start_data: dict[str, Any]) -> GameConfig:
     """
     GAME_STARTのdataからGameConfigを復元する。
@@ -466,7 +498,7 @@ def _fold_events(events: list[dict[str, Any]]) -> dict[str, Any]:
         delta: dict[str, list[Any]] = {
             "offered": [], "accepted": [], "withdrawn": [], "declined": [], "expired": [],
             "resolved": [], "exited": [], "eliminated": [], "rejections": [],
-            "messages": [],
+            "messages": [], "trades": [],
         }
 
         def mark_changed(pid: str, **kv: Any) -> None:
@@ -629,6 +661,53 @@ def _fold_events(events: list[dict[str, Any]]) -> dict[str, Any]:
                     dst["cash"] = dst["cash"] + amount
                     mark_changed(data["to"], cash=dst["cash"])
 
+            elif etype == "TRADE_ACCEPTED":
+                # ★・カード・現金の移動をfoldへ反映しないと、derivation.stars_cross_check
+                # /board_cross_checkが取引成立後に静かにmismatchを出し続ける
+                # （rules/project.md「★はゼロサム」の監視線が死ぬ）。card_idから
+                # 手の種類を逆算してhand_countsも正確に更新する。
+                proposer_id, target_id = data["proposer_id"], data["target_id"]
+                p_seat, t_seat = seats.get(proposer_id), seats.get(target_id)
+
+                def _move_assets(giver: dict[str, Any] | None, receiver: dict[str, Any] | None,
+                                  offer: dict[str, Any]) -> None:
+                    for card_id in offer.get("card_ids", []):
+                        hand_type = _hand_type_from_card_id(card_id)
+                        if hand_type is None:
+                            continue
+                        if giver is not None:
+                            if giver["hand_counts"].get(hand_type, 0) > 0:
+                                giver["hand_counts"][hand_type] -= 1
+                            giver["hand_total"] = max(0, giver["hand_total"] - 1)
+                        if receiver is not None:
+                            receiver["hand_counts"][hand_type] = receiver["hand_counts"].get(hand_type, 0) + 1
+                            receiver["hand_total"] += 1
+                    stars = offer.get("stars", 0)
+                    if stars:
+                        if giver is not None:
+                            giver["stars"] -= stars
+                        if receiver is not None:
+                            receiver["stars"] += stars
+                    cash = offer.get("cash", 0)
+                    if cash:
+                        if giver is not None:
+                            giver["cash"] = max(0, giver["cash"] - cash)
+                        if receiver is not None:
+                            receiver["cash"] += cash
+
+                _move_assets(p_seat, t_seat, data.get("give", {}))
+                _move_assets(t_seat, p_seat, data.get("receive", {}))
+                for pid, seat in ((proposer_id, p_seat), (target_id, t_seat)):
+                    if seat is not None:
+                        mark_changed(pid, stars=seat["stars"], cash=seat["cash"],
+                                     hand_total=seat["hand_total"])
+                delta["trades"].append(as_event_record("TRADE_ACCEPTED", data))
+
+            elif etype in ("TRADE_PROPOSED", "TRADE_PROPOSE_REJECTED", "TRADE_ACCEPT_REJECTED",
+                           "TRADE_REJECTED", "TRADE_WITHDRAWN", "TRADE_EXPIRED", "TRADE_FAILED"):
+                # 資産は動かない。表示用にdeltaへ積むだけ。
+                delta["trades"].append(as_event_record(etype, data))
+
             elif etype == "BOARD_UPDATED":
                 board = {k: data.get(k, 0) for k in _INITIAL_HAND_TYPES}
                 board_checked += 1
@@ -742,6 +821,7 @@ def _project_turn(turn_entry: dict[str, Any], view: str, game_ended: bool) -> di
             "eliminated": [_project_delta_record(r, view, game_ended) for r in delta["eliminated"]],
             "rejections": [_project_delta_record(r, view, game_ended) for r in delta["rejections"]],
             "messages": [_project_delta_record(r, view, game_ended) for r in delta["messages"]],
+            "trades": [_project_delta_record(r, view, game_ended) for r in delta["trades"]],
         },
     }
 

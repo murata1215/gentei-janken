@@ -12,6 +12,16 @@ from engine.models import AssetOffer, PlayerState
 from engine.player import add_card, add_stars, pay, receive, remove_card, remove_stars
 
 
+def make_trade_id(turn: int, proposer_id: str, counter: int) -> str:
+    """
+    取引IDを決定的に生成する（engine/matches.py::make_offer_idと同形式）
+
+    dangou-cardは`f"T_{uuid.uuid4().hex[:8]}"`だったが、genteiは既にoffer_idで
+    確立している決定的ID生成方式を踏襲する（ログの再現性・テストの書きやすさのため）。
+    """
+    return f"T_{turn}_{proposer_id}_{counter}"
+
+
 def _has_offer(player: PlayerState, offer: AssetOffer) -> bool:
     """
     player が offer の資産を実際に差し出せるか判定する（§7.1: 受諾の時点で判定）
