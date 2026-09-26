@@ -95,6 +95,20 @@ def build_phase2_response_schema() -> dict[str, Any]:
     }
 
 
+IMPLEMENTED_ACTION_TYPES = (
+    "pass", "wait", "repay", "transfer",
+    "match_offer", "match_accept", "match_decline", "match_withdraw",
+    "exit",
+)
+"""
+サイクル1.5でengine/game.py::_apply_actionが実処理するアクション種のみ。
+
+dm/broadcast/anonymous_broadcast/trade_*/contract_*/bounty_* はまだ
+ACTION_UNHANDLED（素通り）なので、LLMに選ばせても課金とターンの無駄になる
+だけである。llm/prompt_builder.py::build_action_prompt() はこの集合だけを
+提示する（型A〜D・即時取引・DM等の本実装が入るサイクルでここを拡張する）。
+"""
+
 # --- action_type ごとの必須フィールド（response_parser.py が参照する） ---
 REQUIRED_FIELDS_BY_ACTION_TYPE: dict[str, tuple[str, ...]] = {
     "pass": (),

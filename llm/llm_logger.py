@@ -49,6 +49,7 @@ class LLMLogger:
         error: str | None = None,
         error_type: str | None = None,
         emotion: str | None = None,
+        reasoning: str | None = None,
         finish_reason: str | None = None,
         unit_price_input: float = 0.0,
         unit_price_output: float = 0.0,
@@ -80,8 +81,8 @@ class LLMLogger:
             "error": error,
             "error_type": error_type,
             "emotion": emotion,
-            "reason_category": None,  # Cycle 8: _update_last_log_emotion で後付け
-            "reasoning": None,  # CoT: _update_last_log_emotion で後付け
+            "reason_category": None,  # 未使用（dangou-cardの_update_last_log_emotion相当は本サイクル未移植）
+            "reasoning": reasoning,  # CoT: response_parser.extract_reasoning_and_emotion()で取得（god専用）
             "finish_reason": finish_reason,
             "reasoning_tokens": usage.get("reasoning_tokens", 0),
             "usage_raw": usage.get("usage_raw"),  # 生usageダンプ（Gemini等の未知フィールド炙り出し用）
@@ -127,8 +128,10 @@ class LLMLogger:
         """
         in-memoryエントリでファイルを全書き直しする。
 
-        逐次書き込み中は emotion/reasoning が後付け更新されるため、
-        試合完了後にこのメソッドを呼ぶことでファイルに最終値が反映される。
+        emotion/reasoningはlog_call()呼び出し時点で確定値を渡すため、本来は
+        逐次書き込みのままで整合するが、試合完了後に一度全書き直しすることで
+        逐次書き込み中の書きかけ行（クラッシュ時の不完全な最終行等）が
+        残っていても最終ファイルには影響しないようにする。
         """
         try:
             self._file.close()

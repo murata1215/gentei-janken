@@ -2,13 +2,20 @@
 プロンプト構築モジュール
 
 仕様書§10（目的文）・§5.3（個別通知）・§8.1（残数掲示板）・§5.2（アクション一覧）
-に対応する最小限のプロンプト生成関数を提供する。本サイクルでは3つの主要関数の
-足場のみを実装し、DM秘匿・契約可視化ブロック等の完全な可視状態組み立ては次サイクルで
-拡張する（engine/game.py::_build_visible_state の TODO と対応）。
+に対応するプロンプト生成関数を提供する。
+
+サイクル1.5での変更点: 対戦の申込・受諾に必要な card_id / offer_id / 対戦相手
+候補（alive_player_ids）を件数だけでなく実際の識別子として渡すようにした。
+これらが無いと LLM が対戦を組み立てられず、engine/player.py の
+「does not have card ...」で全て MATCH_OFFER_REJECTED / MATCH_ACCEPT_REJECTED
+になり、試合が1件も成立しなかった（サイクル1.0の実害）。
 """
+
+import json
 
 from engine.config import GameConfig
 from engine.models import PlayerState
+from llm.phase2_schema import IMPLEMENTED_ACTION_TYPES, REQUIRED_FIELDS_BY_ACTION_TYPE
 
 OBJECTIVE_TEXT = (
     "このゲームにおいて、生還は勝利ではなく最低条件である。"
@@ -43,18 +50,21 @@ def build_personal_notice(player: PlayerState, turn: int, visible_state: dict) -
 
     - 現在のターンと残りターン数
     - 現金、借金残高、次の利息計上ターンと見込み額
-    - 手札の種類別枚数（予約中のカードを含む）
+    - 手札の種類別枚数（予約中のカードを含む）とcard_id一覧
+      （card_idはmatch_offer/match_acceptで指定する識別子。自分の手札なので
+      公開/秘匿の区別に関係なく本人には常に見せてよい）
     - ★の数
     - カードを使い切るのに最低限必要なターン数（手札枚数×2）
-    - 届いている対戦申込と取引提案、自分が出している申込
-    - 自分の現在の順位の見込み（清算後の資産で計算） — TODO: 次サイクルで実装
+    - 届いている対戦申込と自分が出している申込（offer_id付き）
+    - 自分の現在の順位の見込み（清算後の資産で計算）
     """
     config: GameConfig = visible_state["config"]
     remaining = config.total_turns - turn
     next_interest_turn = _next_interest_turn(turn, config)
-    hand_counts: dict[str, int] = {}
+
+    hand_groups: dict[str, list[str]] = {"ROCK": [], "SCISSORS": [], "PAPER": []}
     for c in player.cards:
-        hand_counts[c.hand.value] = hand_counts.get(c.hand.value, 0) + 1
+        hand_groups.setdefault(c.hand.value, []).append(c.card_id)
 
     incoming = visible_state.get("offers_incoming", [])
     outgoing = visible_state.get("offers_outgoing", [])
@@ -66,13 +76,47 @@ def build_personal_notice(player: PlayerState, turn: int, visible_state: dict) -
         f"- 借金残高: {player.debt}円",
         f"- 次の利息計上ターン: {next_interest_turn if next_interest_turn else 'なし'}"
         f"（見込み利息: {_estimate_interest(player, config)}円）",
-        f"- 手札: {hand_counts}（計{len(player.cards)}枚、予約中を含む）",
+        "- 手札（card_idを対戦の申込・受諾で指定する）:",
+    ]
+    for hand_value in ("ROCK", "SCISSORS", "PAPER"):
+        ids = hand_groups.get(hand_value, [])
+        lines.append(f"  - {hand_value}: {', '.join(ids) if ids else '(なし)'}")
+    lines += [
+        f"- 手札合計: {len(player.cards)}枚（予約中を含む）",
         f"- ★: {player.stars}個",
         f"- カードを使い切るのに最低限必要なターン数: {len(player.cards) * 2}",
-        f"- 届いている対戦申込: {len(incoming)}件",
-        f"- 自分が出している申込: {len(outgoing)}件",
+        "- 自分の現在の順位の見込み（清算後の資産で計算）: "
+        f"{visible_state.get('projected_rank', '?')}位 / {visible_state.get('projected_rank_total', '?')}人",
+        f"- 届いている対戦申込（{len(incoming)}件。match_acceptまたはmatch_declineでoffer_idを指定する）:",
     ]
+    if incoming:
+        for o in incoming:
+            lines.append(f"  - offer_id={o.offer_id} 申込者={o.challenger_id}")
+    else:
+        lines.append("  - (なし)")
+    lines.append(f"- 自分が出している申込（{len(outgoing)}件。match_withdrawでoffer_idを指定して取り下げられる）:")
+    if outgoing:
+        for o in outgoing:
+            lines.append(
+                f"  - offer_id={o.offer_id} 相手={o.opponent_id} "
+                f"自分の出した手={o.challenger_hand.value} status={o.status}"
+            )
+    else:
+        lines.append("  - (なし)")
     return "\n".join(lines)
+
+
+def build_opponents_section(visible_state: dict) -> str:
+    """
+    対戦の申込先・送金先として指定できるプレイヤーIDの一覧
+
+    engine/game.py::_build_visible_state の alive_player_ids
+    （場に残っている自分以外の全員。★の数と同じく公開情報、§8.2）をそのまま列挙する。
+    """
+    alive = visible_state.get("alive_player_ids", [])
+    if not alive:
+        return "## 場に残っている他プレイヤー\n(なし)"
+    return "## 場に残っている他プレイヤー（対戦・送金の相手先IDに使える）\n" + ", ".join(alive)
 
 
 def build_board_section(board: dict[str, int]) -> str:
@@ -85,16 +129,49 @@ def build_board_section(board: dict[str, int]) -> str:
     )
 
 
+ACTION_DESCRIPTIONS_JA: dict[str, str] = {
+    "pass": "何もしない",
+    "wait": "指定ターンまで、またはイベント発生まで待機する（待機中はLLMを呼び出さない）",
+    "repay": "任意返済（現金で借金を返す。返済額はcash/debtで自動的に上限調整される）",
+    "transfer": "他プレイヤーへ送金する",
+    "match_offer": "対戦を申込む（手とカードを封じて提出する）",
+    "match_accept": "届いている対戦申込を受諾する（手とカードを封じて提出する）",
+    "match_decline": "届いている対戦申込を拒否する",
+    "match_withdraw": "自分が出した対戦申込を取り下げる（受諾前のみ）",
+    "exit": "退出する（§6.1の条件を満たさない場合は不成立になるだけで脱落しない）",
+}
+"""IMPLEMENTED_ACTION_TYPES に対応する日本語の短い説明"""
+
+_ACTION_EXAMPLE = {
+    "action_type": "match_offer",
+    "opponent_id": "P07",
+    "hand": "ROCK",
+    "card_id": "P01_ROCK_1",
+}
+"""build_action_prompt() が末尾に添える具体例（match_offer）"""
+
+
 def build_action_prompt() -> str:
-    """行動選択の指示セクションを構築する（§5.2 アクション一覧）"""
-    return (
-        "## 行動選択\n"
-        "次のいずれか1つをJSONで選択してください: "
-        "DM、全体発言、匿名通信、送金、任意返済、対戦の申込・受諾・拒否・取り下げ、"
-        "カードと★の取引の提案・受諾・拒否・取り下げ、正式契約の提案・署名・解除、"
-        "報奨の掲示・取り下げ、退出、待機、パス。\n"
-        f"{build_objective_reminder()}"
-    )
+    """
+    行動選択の指示セクションを構築する（§5.2）
+
+    IMPLEMENTED_ACTION_TYPES（本サイクルでengineが実処理するアクション種）のみを
+    提示する。未実装（dm/trade_*/contract_*/bounty_*等）は提示しない
+    ——選ばせても ACTION_UNHANDLED で捨てられ、課金とターンの無駄になるため。
+    """
+    lines = [
+        "## 行動選択",
+        "次のいずれか1つを選び、JSONオブジェクトのみで応答してください"
+        "（説明文や前置きは書かず、```json ... ``` または生JSONのみ）。",
+        'キー"action_type"には次の文字列のいずれかを入れてください:',
+    ]
+    for action_type in IMPLEMENTED_ACTION_TYPES:
+        fields = REQUIRED_FIELDS_BY_ACTION_TYPE[action_type]
+        field_note = f"必須フィールド: {', '.join(fields)}" if fields else "他のフィールドは不要"
+        lines.append(f'- "{action_type}": {ACTION_DESCRIPTIONS_JA[action_type]}（{field_note}）')
+    lines.append("例（対戦の申込）: " + json.dumps(_ACTION_EXAMPLE, ensure_ascii=False))
+    lines.append(build_objective_reminder())
+    return "\n".join(lines)
 
 
 def build_system_prompt(player_id: str) -> str:

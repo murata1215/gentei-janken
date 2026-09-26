@@ -68,6 +68,13 @@ Viewer APIは既定で `view=public` とし、DM本文・宛先、匿名発言�
 `X-Viewer-God-Token` の一致を必須とし、未設定・不一致は403にする。`VIEWER_GOD_PUBLIC=1`
 （repo外のEnvironmentFile）を立てた間だけトークン検査をスキップしてよい（dangou-card と同じ設計）。
 
+イベントデータの秘匿判定は**ホワイトリスト方式**（イベント種別ごとに公開してよいキーだけを
+列挙し、未列挙のキー・イベント種別は既定でdataを落とす）に統一すること。ブラックリスト方式
+（秘匿キーを列挙して消す）は、新規イベント種別・新規キーの追加時に列挙漏れがあると秘匿情報が
+そのまま素通りする（サイクル1.5の実害: `SECRET_EVENT_TYPES`/`SECRET_DATA_KEYS` が実在しない
+キー名を指しており、`challenger_hand`/`old_debt`/`cash_before`等が`view=public`で丸見えだった）。
+`viewer/log_parser.py::PUBLIC_EVENT_DATA_KEYS` を参照。
+
 ## LLMコストは常に `usage_cost()` 経由で算出する
 
 `llm/costing.py` の `usage_cost()` / `worst_case_cost()` はキャッシュ割引・thinking差分課金に
@@ -78,6 +85,6 @@ Viewer APIは既定で `view=public` とし、DM本文・宛先、匿名発言�
 
 Claude/DevRelayセッションはSIGALRMタイムアウトを持ち、フォアグラウンド/子プロセスとして起動した
 長時間の `llm_trial.py` はセッションタイムアウトに巻き込まれてkillされる。20人×120ターンのフル試合や
-コスト$1を超えるような長時間トライアルは、必ず `bash scripts/run_trial.sh --phase C ...`
-（`setsid nohup` で親プロセスから完全に切り離す）で起動し、`bash scripts/check_trial.sh` で
-進行確認すること。
+コスト$1を超えるような長時間トライアルは、必ず `bash scripts/run_trial.sh --roster ... --seed ...`
+（`llm_trial.py` の引数をそのまま渡す。`setsid nohup` で親プロセスから完全に切り離す）で起動し、
+`bash scripts/check_trial.sh` で進行確認すること。

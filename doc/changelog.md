@@ -1,5 +1,66 @@
 # Changelog
 
+## 2026-09-26: サイクル1.5: LLM対戦の通電・秘匿の穴閉じ
+
+サイクル1.0の歩く骨格はBot対戦は完動していたが、LLM対戦は構造的に1試合も成立しない
+状態だった（プロンプトがcard_id/offer_id/対戦相手候補を件数だけで渡し、JSON契約を
+明示していなかったため）。実際に有料APIで1試合が成立するところまで通電し、課金
+トライアルが1回の不正応答で落ちないようにし、Viewerの秘匿情報漏れを閉じた。
+
+- **`llm/prompt_builder.py`**: 手札card_id・届いている/出している申込のoffer_id・
+  対戦相手候補（alive_player_ids）・清算後順位見込みを実際の識別子として渡すように
+  書き直した。`build_action_prompt()`は`llm/phase2_schema.py`に新設した
+  `IMPLEMENTED_ACTION_TYPES`（本サイクルでengineが実処理する9種のみ）から
+  `action_type`キー・必須フィールド・例JSONを動的生成する構成に変更。
+- **`engine/game.py`**: `_apply_action`にrepay/transfer/waitの3ハンドラを追加
+  （§7.5送金・任意返済、§5.2待機）。waitは`self._waiting`辞書で管理し、起床条件
+  （until_turn到達 or 対戦申込の到着）を満たさない限りLLMを呼ばずにターンを飛ばす。
+  毎ターン末に`BOARD_UPDATED`イベントを追加（§8.1掲示板がviewerに一度も反映されて
+  いなかった穴を閉じた）。清算後資産の順位（§5.3 7項目目）を`_projected_rank()`で算出。
+- **`llm/response_parser.py`**: `_convert_action`のディスパッチをtry/exceptで包み、
+  int()/dict()/list()の型変換失敗やpydantic ValidationErrorをParseError（リトライ対象）
+  に変換。`extract_reasoning_and_emotion()`を新設し、god専用ログにのみ渡す配線を追加
+  （Actionオブジェクト自体には型として存在しないため構造的に混入しない）。
+- **`llm/llm_agent.py`**: リトライ時に元プロンプト（状態・アクション一覧）を保持した
+  まま是正指示を追記する方式に変更（従来は是正メッセージだけの単発送信で2回目以降の
+  リトライがほぼ確実に失敗していた）。予約コストを固定0.05ドルから
+  `worst_case_cost()`経由に変更、実ターン番号をログに渡すようにした。
+- **`viewer/log_parser.py`**: `_redact_event`をブラックリストからホワイトリスト方式
+  （`PUBLIC_EVENT_DATA_KEYS`）に反転。`challenger_hand`/`opponent_hand`/`old_debt`/
+  `new_debt`/`cash_before`等の秘匿情報をpublic viewから排除し、退出者の`final_assets`
+  はGAME_END後にのみ公開する分岐を追加。`viewer/server.py`の`/api/games/{id}/state`
+  にも`view`引数を追加。
+- **`scripts/llm_trial.py`**: コスト上限を引数化（`--per-player-cap-usd`/
+  `--game-cap-usd`）。20人×120ターンの場合は`GameConfig.default_20()`を使う分岐を
+  追加（`dev_small()`固定だと将来default_20()のパラメータ変更が伝播しない事故を
+  `scripts/dry_run.py`と同じパターンで防止）。
+- **`tests/`**: 5ファイル新規63件（`test_game_loop.py` `test_prompt_builder.py`
+  `test_response_parser.py` `test_cot.py` `test_viewer.py`）。
+
+### 実機検証で発見・修正した新規バグ
+
+LLM（deepseek-v4-flash）が`{"action_type": "wait"}`とだけ返す（until_turn/
+wake_on_eventのどちらも省略）応答を実際に返し、`_should_wake()`が永久にFalseを
+返すため以後一切行動できなくなる実害が発生した（そのプレイヤー宛の対戦申込3件が
+誰にも受諾されず終わった）。`llm/response_parser.py`でwaitの両条件省略をParseError
+化してリトライさせ、`engine/game.py::_handle_wait`でuntil_turnがtotal_turnsを
+超える場合にクランプする二重の安全策を追加した。
+
+### 実機検証結果
+
+`uv run pytest tests/ -v`で153/153 PASS（既存90 + 新規63）。`scripts/dry_run.py
+--bots`で20人×120ターン完走、`ACTION_UNHANDLED`が10件→0件に（repay/transfer/wait
+が実処理されるようになったため）。実際に課金APIで検証: 6人×20ターンで
+**MATCH_RESOLVED 5件**（draw 1件を含む）を実際のLLM応答で確認（費用$0.0149。
+修正前は構造上0件）。Viewerを別ポートで起動し、`view=public`のレスポンスに
+秘匿キーが一切現れないこと、`view=god`のトークン検証（403/200）を実機確認。
+
+### スコープ外（次サイクル）
+
+契約（型A〜D）・即時取引・DM・全体発言・匿名通信・報奨は型とイベントの定義のみで、
+実処理は次サイクル。`tests/test_dm_secrecy.py`もDM本実装と同時に書く
+（実装が無い状態で書くと「実装が無いから通る」テストになるため）。
+
 ## 2026-09-25: サイクル1.0: プロジェクト新設・ガワ作成
 
 嘘八百万シリーズ第2ゲーム「限定ジャンケン」を新規プロジェクトとして立ち上げ、

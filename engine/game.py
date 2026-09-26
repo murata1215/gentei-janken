@@ -1,10 +1,11 @@
 """
 ゲーム進行モジュール（§5）
 
-120ターンのターンループを実行する。「歩く骨格」（本サイクル）が実装する範囲:
+120ターンのターンループを実行する。サイクル1.5までに実装する範囲:
 
     初期配布 → 借入 → 120ターンループ
       （対戦の申込/受諾/拒否/取り下げ・開示、★移動、掲示板更新、
+       任意返済、送金、待機（LLM呼び出しスキップ）、
        ★0強制退場、利息計上、退出判定と清算、T120時間切れ）
     → GAME_END
 
@@ -18,7 +19,7 @@ from engine.cards import board_counts
 from engine.config import GameConfig
 from engine.elimination import forced_liquidation, players_to_force_exit, players_to_timeout
 from engine.events import EventLogger
-from engine.exit_rules import can_exit, settle_exit
+from engine.exit_rules import buyback_amount, can_exit, settle_exit
 from engine.finance import apply_interest_to_all
 from engine.matches import (
     accept_match, decline_match, expire_match, has_active_offer,
@@ -26,10 +27,11 @@ from engine.matches import (
 )
 from engine.models import (
     Action, Contract, ExitAction, MatchAcceptAction, MatchDeclineAction, MatchOffer,
-    MatchOfferAction, MatchWithdrawAction, PassAction, PlayerState,
+    MatchOfferAction, MatchWithdrawAction, PassAction, PlayerState, RepayAction,
+    TransferAction, WaitAction,
 )
 from engine.negotiation import PlayerAgent
-from engine.player import create_player
+from engine.player import can_pay, can_repay_now, create_player, pay, receive, repay_debt
 from engine.rng import GameRng
 
 
@@ -50,6 +52,8 @@ class Game:
         self.contracts: list[Contract] = []
         """TODO（次サイクル）: 型A〜Dの実処理が入るまでは常に空リスト"""
         self._offer_counter = 0
+        self._waiting: dict[str, dict[str, Any]] = {}
+        """player_id -> {"until_turn": int|None, "wake_on_event": bool}（§5.2 待機）"""
 
     # --- セットアップ（§2.1/§2.2） ---
 
@@ -106,6 +110,10 @@ class Game:
         # 申込の失効判定（§4.3）は毎ターン末に行う
         self._expire_offers(turn)
 
+        # 残数掲示板の更新（§8.1: 毎ターンの処理が終わった時点で更新する。公開情報）
+        alive = [p for p in self.players.values() if p.is_alive]
+        self.logger.log("BOARD_UPDATED", turn, "resolve", data=board_counts(alive))
+
     # --- ステップ1/2: 個別通知・行動収集 ---
 
     def _alive_player_ids(self) -> list[str]:
@@ -116,23 +124,52 @@ class Game:
         for player_id in self._alive_player_ids():
             player = self.players[player_id]
             visible_state = self._build_visible_state(player_id, turn)
+            wait_state = self._waiting.get(player_id)
+            if wait_state is not None:
+                if not self._should_wake(turn, wait_state, visible_state):
+                    continue  # 待機中: LLMを呼ばずにこのターンを飛ばす（§5.2）
+                del self._waiting[player_id]
             actions[player_id] = self.agents[player_id].act(player, turn, visible_state)
         return actions
 
-    def _build_visible_state(self, player_id: str, turn: int) -> dict[str, Any]:
-        """
-        個別通知（§5.3）+ 公開情報（§8.1）を構築する
+    def _should_wake(self, turn: int, wait_state: dict[str, Any], visible_state: dict[str, Any]) -> bool:
+        """待機中のプレイヤーを起こすべきか判定する（§5.2）
 
-        TODO（次サイクル）: llm/prompt_builder.py 側の本実装とあわせて、DM秘匿
-        （§8.2）・契約内容秘匿などの完全な可視状態構築に置き換える。
-        本サイクルは StubAgent 専用の最小構成。
+        TODO（次サイクル）: DM・取引提案の到着でも起こす（現状はDM・即時取引が
+        未実装のため、対戦申込の到着のみを判定できる）。
         """
+        until_turn = wait_state.get("until_turn")
+        if until_turn is not None and turn >= until_turn:
+            return True
+        if wait_state.get("wake_on_event") and visible_state.get("offers_incoming"):
+            return True
+        return False
+
+    def _projected_assets(self, player: PlayerState) -> int:
+        """清算後の資産見込み（§5.3 7項目目）。退出済み/脱落済みでも同じ式で正しい値になる"""
+        return player.cash + buyback_amount(player, self.config) - player.debt
+
+    def _projected_rank(self, player_id: str) -> tuple[int, int]:
+        """清算後資産の見込みで順位付けする（タイブレークはplayer_id昇順で決定的に）"""
+        ranked = sorted(
+            self.players.values(),
+            key=lambda p: (-self._projected_assets(p), p.player_id),
+        )
+        total = len(ranked)
+        for idx, p in enumerate(ranked, start=1):
+            if p.player_id == player_id:
+                return idx, total
+        return total, total
+
+    def _build_visible_state(self, player_id: str, turn: int) -> dict[str, Any]:
+        """個別通知（§5.3）+ 公開情報（§8.1）を構築する"""
         player = self.players[player_id]
         alive = [p for p in self.players.values() if p.is_alive]
         incoming = [o for o in self.offers.values()
                     if o.opponent_id == player_id and o.status == "pending"]
         outgoing = [o for o in self.offers.values()
                     if o.challenger_id == player_id and o.status in ("pending", "accepted")]
+        rank, rank_total = self._projected_rank(player_id)
         return {
             "config": self.config,
             "turn": turn,
@@ -144,6 +181,8 @@ class Game:
             "offers_incoming": incoming,
             "offers_outgoing": outgoing,
             "alive_player_ids": [p.player_id for p in alive if p.player_id != player_id],
+            "projected_rank": rank,
+            "projected_rank_total": rank_total,
         }
 
     # --- ステップ3: 行動の処理 ---
@@ -172,10 +211,79 @@ class Game:
         if isinstance(action, ExitAction):
             self._handle_exit(turn, player)
             return
-        # TODO（次サイクル）: dm / broadcast / anonymous_broadcast / transfer / repay /
+        if isinstance(action, RepayAction):
+            self._handle_repay(turn, player, action)
+            return
+        if isinstance(action, TransferAction):
+            self._handle_transfer(turn, player, action)
+            return
+        if isinstance(action, WaitAction):
+            self._handle_wait(turn, player, action)
+            return
+        # TODO（次サイクル）: dm / broadcast / anonymous_broadcast /
         # trade_* / contract_* / bounty_* はまだ処理しない。
         self.logger.log("ACTION_UNHANDLED", turn, "resolve", data={
             "player_id": player_id, "action_type": action.type,
+        })
+
+    def _handle_repay(self, turn: int, player: PlayerState, action: RepayAction) -> None:
+        """任意返済（§2.4/§7.5）。その場で決済する"""
+        if action.amount <= 0:
+            self.logger.log("REPAY_REJECTED", turn, "resolve", data={
+                "player_id": player.player_id, "reason": "non_positive_amount",
+            })
+            return
+        if not can_repay_now(player, turn, self.config):
+            self.logger.log("REPAY_REJECTED", turn, "resolve", data={
+                "player_id": player.player_id, "reason": "repay_locked",
+            })
+            return
+        updated = repay_debt(player, action.amount)
+        actual = player.debt - updated.debt
+        self.players[player.player_id] = updated
+        self.logger.log("REPAID", turn, "resolve", data={
+            "player_id": player.player_id, "amount": actual, "new_debt": updated.debt,
+        })
+
+    def _handle_transfer(self, turn: int, player: PlayerState, action: TransferAction) -> None:
+        """送金（§7.5）。その場で決済する"""
+        target = self.players.get(action.to)
+        if action.amount <= 0 or target is None or target.player_id == player.player_id \
+                or not target.is_alive:
+            self.logger.log("TRANSFER_REJECTED", turn, "resolve", data={
+                "player_id": player.player_id, "to": action.to,
+                "reason": "invalid_target_or_amount",
+            })
+            return
+        if not can_pay(player, action.amount):
+            self.logger.log("TRANSFER_REJECTED", turn, "resolve", data={
+                "player_id": player.player_id, "to": action.to, "reason": "insufficient_cash",
+            })
+            return
+        self.players[player.player_id] = pay(player, action.amount)
+        self.players[target.player_id] = receive(target, action.amount)
+        self.logger.log("TRANSFERRED", turn, "resolve", data={
+            "from": player.player_id, "to": target.player_id, "amount": action.amount,
+        })
+
+    def _handle_wait(self, turn: int, player: PlayerState, action: WaitAction) -> None:
+        """
+        待機（§5.2）。次に起こされるまでLLMを呼ばない
+
+        until_turn が total_turns を超える値の場合は total_turns にクランプする
+        （llm/response_parser.py 側でwake_on_event/until_turn未指定は既に拒否して
+        いるが、「T500まで待つ」のような値が来た場合の二重の安全策。これが無いと
+        wake_on_event=Falseのまま最終ターンを過ぎてもLLMが二度と呼ばれない）。
+        """
+        until_turn = action.until_turn
+        if until_turn is not None and until_turn > self.config.total_turns:
+            until_turn = self.config.total_turns
+        self._waiting[player.player_id] = {
+            "until_turn": until_turn, "wake_on_event": action.wake_on_event,
+        }
+        self.logger.log("WAIT_STARTED", turn, "resolve", data={
+            "player_id": player.player_id,
+            "until_turn": until_turn, "wake_on_event": action.wake_on_event,
         })
 
     def _handle_match_offer(self, turn: int, player: PlayerState, action: MatchOfferAction) -> None:
@@ -254,6 +362,7 @@ class Game:
             return
         updated = settle_exit(player, self.config, turn)
         self.players[player.player_id] = updated
+        self._waiting.pop(player.player_id, None)
         self.logger.log("PLAYER_EXITED", turn, "resolve", data={
             "player_id": player.player_id, "final_assets": updated.final_assets,
         })
@@ -282,6 +391,7 @@ class Game:
                 self.players[pid], "FORCED_EXIT", turn, self.contracts,
             )
             self.players[pid] = player
+            self._waiting.pop(pid, None)
             self.logger.log("FORCED_EXIT", turn, "eliminate", data=record)
 
     # --- ステップ8: 時間切れ（T120のみ） ---
@@ -292,6 +402,7 @@ class Game:
                 self.players[pid], "TIMEOUT", turn, self.contracts,
             )
             self.players[pid] = player
+            self._waiting.pop(pid, None)
             self.logger.log("TIMEOUT", turn, "exit", data=record)
 
     # --- 申込の失効（§4.3） ---

@@ -15,6 +15,8 @@ import logging
 import re
 from typing import Any
 
+from pydantic import ValidationError
+
 from engine.models import (
     Action, AnonymousBroadcastAction, AssetOffer, BountyCancelAction, BountyPostAction,
     BroadcastAction, ContractCancelAction, ContractProposeAction, ContractSignAction,
@@ -104,6 +106,27 @@ def normalize_emotion(strategy: dict[str, Any]) -> dict[str, Any]:
     return strategy
 
 
+def extract_reasoning_and_emotion(text: str) -> tuple[str | None, str | None]:
+    """
+    LLM応答からreasoning/emotionだけを取り出す（god専用ログ用、CoT秘匿）
+
+    rules/project.md「CoT reasoningフィールドは秘匿情報」に基づき、この関数の
+    戻り値は llm/llm_agent.py 経由で llm/llm_logger.py（神視点のみ閲覧可能な
+    JSONLログ）にのみ渡すこと。engine.models.Action にはreasoning/emotion用の
+    フィールドが存在しないため、parse_action() が返すActionには決して混入しない
+    （可視状態・イベント・他プレイヤー向けプロンプトに現れないことは構造的に保証される）。
+    """
+    data = extract_json(text)
+    if data is None:
+        return None, None
+    reasoning = data.get("reasoning")
+    if not isinstance(reasoning, str) or not reasoning.strip():
+        reasoning = None
+    normalized = normalize_emotion(dict(data))
+    emotion = normalized.get("emotion")
+    return reasoning, emotion
+
+
 def make_correction_message(error: ParseError) -> str:
     """リトライ用の是正指示メッセージを生成する"""
     return (
@@ -156,11 +179,40 @@ def _convert_action(data: dict[str, Any], player_id: str) -> Action:
             f"次のフィールドを含めてください: {missing}",
         )
 
+    try:
+        return _dispatch_action(action_type, data, player_id)
+    except ParseError:
+        raise
+    except (ValueError, TypeError, KeyError, ValidationError) as e:
+        # int()/dict()/list()の型変換失敗やpydanticのValidationErrorはここで
+        # ParseErrorに変換し、呼び出し元（llm_agent.py）のリトライに乗せる。
+        # ここを通さずに素通りすると1回の不正な応答で試合全体が落ちる
+        # （dry_run未検出だった実害: amountが文字列、toがlist等）。
+        raise ParseError(
+            f"action_type={action_type!r} のフィールド値が不正です: {e}",
+            "各フィールドの型・値を仕様に合わせて修正してください"
+            "（例: amountは整数、to/card_id/offer_idは文字列）。",
+        ) from e
+
+
+def _dispatch_action(action_type: str, data: dict[str, Any], player_id: str) -> Action:
     if action_type == "pass":
         return PassAction(player_id=player_id)
     if action_type == "wait":
-        return WaitAction(player_id=player_id, until_turn=data.get("until_turn"),
-                           wake_on_event=bool(data.get("wake_on_event", False)))
+        until_turn = data.get("until_turn")
+        wake_on_event = bool(data.get("wake_on_event", False))
+        if until_turn is None and not wake_on_event:
+            # 実測で発見した実害: どちらも指定しない待機はengine/game.py::_should_wake()
+            # がT120まで一度も真にならず、そのプレイヤーが以後一切行動できなくなる
+            # （dry_run/LLMスモークで実際に発生: P01が"wait"だけ返し、以後届いた
+            # 対戦申込3件すべてを一度も受け取れなかった）。§5.2は「T45まで待つ」
+            # または「イベントが届いたら起こして」のどちらかを宣言する行動として
+            # 定義しているため、どちらも無い場合は不正な入力としてリトライさせる。
+            raise ValueError(
+                "waitはuntil_turn（整数）またはwake_on_event=trueのどちらかを"
+                "指定する必要があります（両方省略すると二度と行動できなくなります）"
+            )
+        return WaitAction(player_id=player_id, until_turn=until_turn, wake_on_event=wake_on_event)
     if action_type == "dm":
         return DmAction(player_id=player_id, to=data["to"], message=data["message"])
     if action_type == "broadcast":

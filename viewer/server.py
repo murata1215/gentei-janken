@@ -90,9 +90,11 @@ async def api_games(_=Depends(check_token)):
 
 
 @app.get("/api/games/{game_id}/state")
-async def api_game_state(game_id: str, _=Depends(check_token)):
-    """試合の現在状態サマリを返す"""
-    return get_game_state(LOGS_DIR, game_id)
+async def api_game_state(
+    game_id: str, request: Request, view: str = Query("public"), _=Depends(check_token),
+):
+    """試合の現在状態サマリを返す（§8.2の公開/秘匿境界に従う）"""
+    return get_game_state(LOGS_DIR, game_id, view=check_view(request, view))
 
 
 @app.get("/api/games/{game_id}/turns")
