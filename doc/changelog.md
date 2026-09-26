@@ -1,5 +1,51 @@
 # Changelog
 
+## 2026-09-26: サイクル1.9: DM・全体発言・匿名通信の通電
+
+ユーザーから「DM・契約・取引は談合カードから持ってきていないのか」と指摘され精査した
+結果、パーサ・モデル層（21アクション）は全て完成済みで、engine処理本体だけが
+ACTION_UNHANDLEDで空という状態だった。契約（型A〜D）は談合固有の型B照合ロジック
+（`autocommit.py`133行）が丸ごと使えず実質新規設計のため今回は見送り、
+メッセージ系（dangou-cardで約190行・ドメイン依存ゼロ）から着手した。
+
+- **`engine/models.py`**: `Message`（pydantic）を新設。dangou-cardの「素のdict」
+  方式ではなく型安全な保管を選び、可視化（誰に何を見せるか）は
+  `engine/messages.py::visible_messages()`の純関数に分離した
+  （`tests/test_dm_secrecy.py`がGameインスタンス無しで直接検証できる）。
+- **`engine/messages.py`**（新規）: `visible_messages()`はDM本文を当事者以外から
+  キーごと削除（rules/project.mdと同方式）。匿名通信の実送信者は`Message`自体に
+  一切乗せず、別辞書`Game._anon_message_owners`（message_idキー）でのみ管理する
+  ——dangou-cardのindex キー方式（リストの途中を削ると全部ズレる危険）を
+  message_idキーに変えて構造的に安全にした。
+- **メッセージのライフサイクル**: 全ターン全件保持（削除しない）。§5.2の
+  「DMが届いたら起こして」という待機の起床条件と、本文の寿命を一致させるため。
+  プロンプト表示は`GameConfig.message_prompt_window_turns`/`message_prompt_limit`
+  で絞るが、自分宛の未読DMは窓の外でも必ず全件表示する。
+- **`engine/game.py`**: `_handle_dm`/`_handle_broadcast`/`_handle_anonymous_broadcast`
+  を追加。`_should_wake`にDM到着条件を追加したが、**全体発言は起床条件に含めない**
+  ——1人がbroadcastしただけで待機中の全員が起きると、待機機構（LLM呼び出し削減）の
+  目的が真逆になる（§5.2が「DM・対戦申込・取引提案」とだけ列挙し全体発言を
+  含めていないことに忠実に従った）。
+- **`llm/prompt_builder.py`**: `build_messages_section()`新設。`build_action_prompt()`
+  に`config`引数を追加し、匿名通信の料金・上限をハードコードせず表示。
+- **`viewer/log_parser.py`**: `DM_SENT`(messageを除外)/`BROADCAST_SENT`(全公開)/
+  `ANONYMOUS_BROADCAST_SENT`(senderを除外)のホワイトリストを追加。`message`は
+  `reason`と違って値の検査が不要である理由をコメントに明記
+  （broadcastは§8.2で元々公開情報、DMのmessageはキー自体を列挙していないので
+  deny-by-defaultで自動的に落ちる）。
+- **`viewer/static/index.html`**: 席カードに発言の吹き出し、フッタにメッセージ
+  ティッカーを追加。Playwrightで実機確認し、publicではDM本文が「(非公開)」に
+  なり全体発言は表示される、godでは両方見えることを screenshot で確認。
+- **テスト**: 36件新規（`test_dm_secrecy.py`・`test_messages.py`新規、
+  `test_viewer_secrecy.py`に6件追加）。全279件PASS。
+- **実課金トライアル3本**（`L6,L6,L6,L6,L6,L6`・20ターン・$0.093）で実測:
+  pass率0.9%（中央値）、MATCH_RESOLVED 23件（中央値、Stage 0の19件から
+  **減っていない**＝「喋ると殴れない」問題は発生せず）、発言6件（中央値）。
+  broadcastで「全員に提案。カード12枚に対し残り19ターンでは全員生還不可能。
+  同時多発対戦をしないか」という具体的な協調の呼びかけが自発的に発生した。
+  DM・匿名通信は0件（20ターン設定では全員が同じ危機に直面するため全体呼びかけが
+  優先された可能性。120ターンの本番でどう変わるか要観察）。
+
 ## 2026-09-26: サイクル1.8: LLM対戦を成立させる基盤整備（★可視化・memory配線）
 
 ユーザーから「ゲーム開始できるのかな」と聞かれ調査したところ、既存LLM戦の実測が

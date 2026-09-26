@@ -56,6 +56,18 @@ PUBLIC_EVENT_DATA_KEYS: dict[str, set[str]] = {
     "WAIT_STARTED": {"player_id", "until_turn", "wake_on_event"},
     "BOARD_UPDATED": {"ROCK", "SCISSORS", "PAPER"},
     "ACTION_UNHANDLED": {"player_id", "action_type"},
+    # DM本文は当事者以外に秘匿（§8.2）。senderは常に公開情報として残す
+    # （「誰と誰がDMしているか」は§8.2が明示的に禁じていない場のドラマの材料）。
+    # message（本文）はここに列挙しないことで自動的に落とす。
+    "DM_SENT": {"sender", "to", "turn"},
+    "DM_REJECTED": {"player_id", "reason"},
+    # 全体発言は本文・発信者ともに公開情報（§8.2「全体発言」）。
+    "BROADCAST_SENT": {"sender", "message", "turn"},
+    "BROADCAST_REJECTED": {"player_id", "reason"},
+    # 匿名通信は本文のみ公開、発信者は秘匿（§8.2「匿名通信…の発信者」）。
+    # senderをここに列挙しないことで自動的に落とす（実送信者はgod専用）。
+    "ANONYMOUS_BROADCAST_SENT": {"message", "turn"},
+    "ANON_BROADCAST_REJECTED": {"player_id", "reason"},
 }
 
 _PLAYER_EXITED_POST_GAME_KEYS = PUBLIC_EVENT_DATA_KEYS["PLAYER_EXITED"] | {"final_assets"}
@@ -82,7 +94,19 @@ PUBLIC_REASON_CODES: set[str] = {
     "insufficient_stars",         # engine/exit_rules.py: can_exit
     "cannot_clear_debt",          # engine/exit_rules.py: can_exit
     "unfulfilled_obligation",     # engine/exit_rules.py: can_exit
+    "invalid_target",             # engine/game.py: DM_REJECTED
+    "empty_message",              # engine/game.py: DM_REJECTED/BROADCAST_REJECTED/ANON_BROADCAST_REJECTED
+    "anon_limit_reached",         # engine/game.py: ANON_BROADCAST_REJECTED
 }
+
+# 注意: `message`（DM本文・全体発言・匿名通信の本文）は`reason`と違って値の
+# ホワイトリストが不要である。broadcast/anonymous_broadcastのmessageはLLMの
+# 自由記述だが§8.2でそもそも公開情報と定められているため、値を問わず公開してよい。
+# DM_SENTの`message`はキーそのものをPUBLIC_EVENT_DATA_KEYSに列挙していない
+# （＝deny-by-defaultで自動的に落ちる）ため、こちらも値検査は不要。
+# `reason`だけが特別なのは、キーはpublic許可なのに値がengine内部のstr(ValueError)
+# 由来で秘匿情報（card_id等）を埋め込みうる、という設計ミスが原因だった
+# （サイクル1.6.1）。同じ穴が`message`系で開くことは構造上ない。
 
 
 def _sanitize_reason(data: dict[str, Any]) -> dict[str, Any]:
@@ -442,6 +466,7 @@ def _fold_events(events: list[dict[str, Any]]) -> dict[str, Any]:
         delta: dict[str, list[Any]] = {
             "offered": [], "accepted": [], "withdrawn": [], "declined": [], "expired": [],
             "resolved": [], "exited": [], "eliminated": [], "rejections": [],
+            "messages": [],
         }
 
         def mark_changed(pid: str, **kv: Any) -> None:
@@ -537,8 +562,15 @@ def _fold_events(events: list[dict[str, Any]]) -> dict[str, Any]:
                 delta["resolved"].append(as_event_record("MATCH_RESOLVED", data))
 
             elif etype in ("MATCH_OFFER_REJECTED", "MATCH_ACCEPT_REJECTED", "EXIT_REJECTED",
-                           "REPAY_REJECTED", "TRANSFER_REJECTED"):
+                           "REPAY_REJECTED", "TRANSFER_REJECTED",
+                           "DM_REJECTED", "BROADCAST_REJECTED", "ANON_BROADCAST_REJECTED"):
                 delta["rejections"].append(as_event_record(etype, data))
+
+            elif etype in ("DM_SENT", "BROADCAST_SENT", "ANONYMOUS_BROADCAST_SENT"):
+                # 資産・盤面状態には触れない（メッセージは席のstateを変えない）。
+                # 投影は_project_delta_record経由でPUBLIC_EVENT_DATA_KEYSに従う
+                # （DM本文・匿名senderはそこで自動的に落ちる）。
+                delta["messages"].append(as_event_record(etype, data))
 
             elif etype == "PLAYER_EXITED":
                 pid = data["player_id"]
@@ -709,6 +741,7 @@ def _project_turn(turn_entry: dict[str, Any], view: str, game_ended: bool) -> di
             "exited": [_project_delta_record(r, view, game_ended) for r in delta["exited"]],
             "eliminated": [_project_delta_record(r, view, game_ended) for r in delta["eliminated"]],
             "rejections": [_project_delta_record(r, view, game_ended) for r in delta["rejections"]],
+            "messages": [_project_delta_record(r, view, game_ended) for r in delta["messages"]],
         },
     }
 

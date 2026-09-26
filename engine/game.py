@@ -25,10 +25,12 @@ from engine.matches import (
     accept_match, decline_match, expire_match, has_active_offer,
     make_offer_id, offer_match, resolve_match, withdraw_match,
 )
+from engine.messages import can_send_anonymous, format_message_body, make_message_id, visible_messages
 from engine.models import (
-    Action, Contract, ExitAction, MatchAcceptAction, MatchDeclineAction, MatchOffer,
-    MatchOfferAction, MatchOutcome, MatchWithdrawAction, PassAction, PlayerState,
-    RepayAction, TransferAction, WaitAction,
+    Action, AnonymousBroadcastAction, BroadcastAction, Contract, DmAction, ExitAction,
+    MatchAcceptAction, MatchDeclineAction, MatchOffer, MatchOfferAction, MatchOutcome,
+    MatchWithdrawAction, Message, PassAction, PlayerState, RepayAction, TransferAction,
+    WaitAction,
 )
 from engine.negotiation import PlayerAgent
 from engine.player import can_pay, can_repay_now, create_player, pay, receive, repay_debt
@@ -58,6 +60,18 @@ class Game:
         self._offer_counter = 0
         self._waiting: dict[str, dict[str, Any]] = {}
         """player_id -> {"until_turn": int|None, "wake_on_event": bool}（§5.2 待機）"""
+        self.messages: list[Message] = []
+        """全ターン全件保持（削除しない。§5.2 waitの「DMが届いたら起こして」と
+        起床トリガの寿命を一致させるため）。表示件数の絞り込みはプロンプト側で行う"""
+        self._anon_message_owners: dict[str, str] = {}
+        """message_id -> 実送信者（§8.2秘匿。messagesオブジェクト自体には乗せない）"""
+        self._message_counter = 0
+        self._anon_sent_this_turn: dict[str, int] = {}
+        """player_id -> このターンに送った匿名通信の数（§7.5: 1ターン1通まで、毎ターン先頭でクリア）"""
+        self._message_seen_turn: dict[str, int] = {}
+        """player_id -> 最後にact()が呼ばれたターン（プロンプト表示窓の外でも
+        自分宛未読DMを出すための判定に使う。待機中は更新されず、寝ている間の
+        DMは全て「未読」のまま蓄積する）"""
 
     # --- セットアップ（§2.1/§2.2） ---
 
@@ -88,6 +102,8 @@ class Game:
 
     def _run_turn(self, turn: int) -> None:
         """1ターンの処理（§5.1 ステップ1〜8）"""
+        self._anon_sent_this_turn.clear()
+
         # ステップ1（個別通知）+ ステップ2（行動の収集）
         actions = self._collect_actions(turn)
 
@@ -134,19 +150,26 @@ class Game:
                     continue  # 待機中: LLMを呼ばずにこのターンを飛ばす（§5.2）
                 del self._waiting[player_id]
             actions[player_id] = self.agents[player_id].act(player, turn, visible_state)
+            self._message_seen_turn[player_id] = turn
         return actions
 
     def _should_wake(self, turn: int, wait_state: dict[str, Any], visible_state: dict[str, Any]) -> bool:
         """待機中のプレイヤーを起こすべきか判定する（§5.2）
 
-        TODO（次サイクル）: DM・取引提案の到着でも起こす（現状はDM・即時取引が
-        未実装のため、対戦申込の到着のみを判定できる）。
+        DM・対戦申込・取引提案のいずれかが届いたら起こす。全体発言・匿名通信は
+        意図的に起床条件から除外する——1人がbroadcastしただけで待機中の全員が
+        起きると、待機機構（LLM呼び出し削減）の目的が真逆になる（§5.2は
+        「DM・対戦申込・取引提案」とだけ列挙しており全体発言は含まれない）。
+        取引提案（trades_incoming）はサイクル2.0で追加する。
         """
         until_turn = wait_state.get("until_turn")
         if until_turn is not None and turn >= until_turn:
             return True
-        if wait_state.get("wake_on_event") and visible_state.get("offers_incoming"):
-            return True
+        if wait_state.get("wake_on_event"):
+            if visible_state.get("offers_incoming"):
+                return True
+            if visible_state.get("dms_unread"):
+                return True
         return False
 
     def _projected_assets(self, player: PlayerState) -> int:
@@ -174,6 +197,7 @@ class Game:
         outgoing = [o for o in self.offers.values()
                     if o.challenger_id == player_id and o.status in ("pending", "accepted")]
         rank, rank_total = self._projected_rank(player_id)
+        messages, dms_unread = self._visible_messages_for(player_id, turn)
         return {
             "config": self.config,
             "turn": turn,
@@ -190,7 +214,34 @@ class Game:
             "opponents": self._opponent_public_stats(player_id),
             "projected_rank": rank,
             "projected_rank_total": rank_total,
+            "messages": messages,
+            "dms_unread": dms_unread,
         }
+
+    def _visible_messages_for(self, player_id: str, turn: int) -> tuple[list[dict[str, Any]], bool]:
+        """
+        プロンプトに載せるメッセージを組み立てる（§5.2）
+
+        2段フィルタ: ①visible_messages()による可視性の投影（秘匿境界）
+        ②直近message_prompt_window_turns・最大message_prompt_limit件に絞る。
+        自分宛の未読DM（前回act()が呼ばれたターンより後のもの）は窓の外でも
+        必ず全件含める——寝ていたプレイヤーが起きた時に起床理由のDMが
+        表示から漏れることを防ぐ。
+        """
+        all_visible = visible_messages(self.messages, self._anon_message_owners, player_id)
+        last_seen = self._message_seen_turn.get(player_id, -1)
+        unread_dms = [
+            m for m in all_visible
+            if m["type"] == "dm" and m.get("to") == player_id and m["turn"] > last_seen
+        ]
+        window_start = turn - self.config.message_prompt_window_turns
+        recent = [m for m in all_visible if m["turn"] >= window_start]
+        recent = recent[-self.config.message_prompt_limit:]
+        combined: dict[str, dict[str, Any]] = {m["message_id"]: m for m in recent}
+        for m in unread_dms:
+            combined[m["message_id"]] = m
+        ordered = sorted(combined.values(), key=lambda m: (m["turn"], m["message_id"]))
+        return ordered, bool(unread_dms)
 
     def _opponent_public_stats(self, player_id: str) -> list[dict[str, Any]]:
         """
@@ -247,10 +298,96 @@ class Game:
         if isinstance(action, WaitAction):
             self._handle_wait(turn, player, action)
             return
-        # TODO（次サイクル）: dm / broadcast / anonymous_broadcast /
-        # trade_* / contract_* / bounty_* はまだ処理しない。
+        if isinstance(action, DmAction):
+            self._handle_dm(turn, player, action)
+            return
+        if isinstance(action, BroadcastAction):
+            self._handle_broadcast(turn, player, action)
+            return
+        if isinstance(action, AnonymousBroadcastAction):
+            self._handle_anonymous_broadcast(turn, player, action)
+            return
+        # TODO（次サイクル）: trade_* / contract_* / bounty_* はまだ処理しない。
         self.logger.log("ACTION_UNHANDLED", turn, "resolve", data={
             "player_id": player_id, "action_type": action.type,
+        })
+
+    def _handle_dm(self, turn: int, player: PlayerState, action: DmAction) -> None:
+        """DM送信（§5.2）。行動枠を1つ消費する"""
+        target = self.players.get(action.to)
+        if target is None or target.player_id == player.player_id or not target.is_alive:
+            self.logger.log("DM_REJECTED", turn, "resolve", data={
+                "player_id": player.player_id, "reason": "invalid_target",
+            })
+            return
+        body = action.message.strip()
+        if not body:
+            self.logger.log("DM_REJECTED", turn, "resolve", data={
+                "player_id": player.player_id, "reason": "empty_message",
+            })
+            return
+        body = format_message_body(body, self.config.message_max_length)
+        self._message_counter += 1
+        message_id = make_message_id(turn, self._message_counter)
+        self.messages.append(Message(
+            message_id=message_id, sender=player.player_id, type="dm",
+            to=action.to, message=body, turn=turn,
+        ))
+        # dataには本文(god専用)も入れる。public投影はviewer/log_parser.pyの
+        # PUBLIC_EVENT_DATA_KEYSがmessageキーを落とす（§8.2 DM本文は秘匿）。
+        self.logger.log("DM_SENT", turn, "resolve", data={
+            "sender": player.player_id, "to": action.to, "message": body, "turn": turn,
+        })
+
+    def _handle_broadcast(self, turn: int, player: PlayerState, action: BroadcastAction) -> None:
+        """全体発言（§5.2）。本文・発信者ともに公開情報（§8.2）"""
+        body = action.message.strip()
+        if not body:
+            self.logger.log("BROADCAST_REJECTED", turn, "resolve", data={
+                "player_id": player.player_id, "reason": "empty_message",
+            })
+            return
+        body = format_message_body(body, self.config.message_max_length)
+        self._message_counter += 1
+        message_id = make_message_id(turn, self._message_counter)
+        self.messages.append(Message(
+            message_id=message_id, sender=player.player_id, type="broadcast",
+            to=None, message=body, turn=turn,
+        ))
+        self.logger.log("BROADCAST_SENT", turn, "resolve", data={
+            "sender": player.player_id, "message": body, "turn": turn,
+        })
+
+    def _handle_anonymous_broadcast(self, turn: int, player: PlayerState, action: AnonymousBroadcastAction) -> None:
+        """匿名通信（§7.5: 10万円で1メッセージ、1ターン1通まで。発信者は秘匿）"""
+        body = action.message.strip()
+        if not body:
+            self.logger.log("ANON_BROADCAST_REJECTED", turn, "resolve", data={
+                "player_id": player.player_id, "reason": "empty_message",
+            })
+            return
+        sent_this_turn = self._anon_sent_this_turn.get(player.player_id, 0)
+        ok, reason = can_send_anonymous(player, self.config, sent_this_turn)
+        if not ok:
+            self.logger.log("ANON_BROADCAST_REJECTED", turn, "resolve", data={
+                "player_id": player.player_id, "reason": reason,
+            })
+            return
+        self.players[player.player_id] = pay(player, self.config.anonymous_message_fee)
+        self._anon_sent_this_turn[player.player_id] = sent_this_turn + 1
+        body = format_message_body(body, self.config.message_max_length)
+        self._message_counter += 1
+        message_id = make_message_id(turn, self._message_counter)
+        # senderは常にNone（Messageオブジェクト自体に実送信者を乗せない）。
+        # 実送信者は_anon_message_ownersにのみ保持する（§8.2秘匿の構造的担保）。
+        self.messages.append(Message(
+            message_id=message_id, sender=None, type="anonymous_broadcast",
+            to=None, message=body, turn=turn,
+        ))
+        self._anon_message_owners[message_id] = player.player_id
+        # dataのsenderはgod専用（viewer/log_parser.pyのホワイトリストで落ちる）。
+        self.logger.log("ANONYMOUS_BROADCAST_SENT", turn, "resolve", data={
+            "message": body, "turn": turn, "sender": player.player_id,
         })
 
     def _handle_repay(self, turn: int, player: PlayerState, action: RepayAction) -> None:

@@ -99,6 +99,16 @@ class GameConfig(BaseModel):
     anonymous_message_limit_per_turn: int = 1
     """匿名通信の1ターン1人あたり上限（§7.5/§11: 1通まで）"""
 
+    # --- 通信のプロンプト表示（§5.2、サイクル1.9） ---
+    message_prompt_limit: int = 12
+    """プロンプトに載せるメッセージの最大件数（直近から。Messageの保管自体は全ターン全件）"""
+
+    message_prompt_window_turns: int = 10
+    """プロンプトに載せるメッセージの遡及ターン数（自分宛の未読DMはこの窓の外でも全件表示する）"""
+
+    message_max_length: int = 200
+    """1メッセージ本文の上限文字数（DM・全体発言・匿名通信共通。超過分は切り捨て）"""
+
     @classmethod
     def default_20(cls) -> "GameConfig":
         """20人版デフォルト設定を返す（仕様書§11の確定パラメータに準拠）"""

@@ -26,8 +26,8 @@ from llm.game_cost_budget import BudgetBlockedError, GameCostBudget
 from llm.llm_logger import LLMLogger
 from llm.models import ModelInfo
 from llm.prompt_builder import (
-    build_action_prompt, build_board_section, build_opponents_section,
-    build_personal_notice, build_system_prompt,
+    build_action_prompt, build_board_section, build_messages_section,
+    build_opponents_section, build_personal_notice, build_system_prompt,
 )
 from llm.response_parser import (
     ParseError, extract_memory, extract_reasoning_and_emotion, make_correction_message, parse_action,
@@ -107,8 +107,9 @@ class LLMAgent(PlayerAgent):
         sections += [
             build_personal_notice(player_state, turn, visible_state),
             build_opponents_section(visible_state),
+            build_messages_section(visible_state),
             build_board_section(visible_state.get("board", {})),
-            build_action_prompt(),
+            build_action_prompt(self._config),
         ]
         base_prompt = "\n\n".join(sections)
         prompt = base_prompt

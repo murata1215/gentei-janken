@@ -117,3 +117,42 @@
 - [x] 実課金トライアル3本（L6×6・20ターン、$0.072）で実測: **pass率70.8%→5.9%
       （12分の1）、MATCH_RESOLVED 5件→19件中央値（3.8倍）**。memoryは120回中116回
       （97%）で使用され、具体的な計画（利息ターン・借金返済時期等）を記憶し続けた
+
+## DM・全体発言・匿名通信の通電（サイクル1.9・完了、Stage 1）
+
+パーサ・モデル層（21アクション）は既に完成済みで、engine処理本体だけが
+ACTION_UNHANDLEDで空だった穴を埋めた。dangou-cardのメッセージ実装（約190行、
+ドメイン依存ゼロ）を参考に、gentei側のターン制（120ターンのフラット制＋
+wait/wake_on_eventの非同期起床）に合わせて設計し直した。
+
+- [x] `engine/models.py`に`Message`（pydantic）新設。保管は型安全、投影
+      （誰に何を見せるか）は`engine/messages.py::visible_messages()`の純関数に分離
+- [x] `engine/messages.py`新規: `visible_messages()`はDM本文を当事者以外から
+      キーごと削除（空文字上書きではない）、匿名通信の実送信者は`Message`自体に
+      一切乗せず`Game._anon_message_owners`（message_idキー。dangou-cardの
+      indexキー方式より安全）で別管理
+- [x] メッセージは**全ターン全件保持**（削除しない。§5.2「DMが届いたら起こして」と
+      起床トリガの寿命を一致させるため）。プロンプト表示は2段フィルタ
+      （直近`message_prompt_window_turns`・`message_prompt_limit`件＋自分宛
+      未読DMは窓の外でも全件）
+- [x] `engine/game.py`: `_handle_dm`/`_handle_broadcast`/`_handle_anonymous_broadcast`
+      追加。`_should_wake`にDM到着条件を追加（**全体発言は起床条件に含めない**
+      ——1人がbroadcastしただけで待機中の全員が起きるとLLM呼び出しが激増するため、
+      §5.2の逐語「DM・対戦申込・取引提案」に忠実に従った）
+- [x] `llm/prompt_builder.py::build_messages_section`新規、`build_action_prompt`に
+      `config`引数を追加（匿名通信の料金・上限をハードコードせず表示）
+- [x] `viewer/log_parser.py`: `DM_SENT`(message除外)/`BROADCAST_SENT`(全公開)/
+      `ANONYMOUS_BROADCAST_SENT`(sender除外)のホワイトリスト追加。`_fold_events`の
+      turn delta に`messages`を追加
+- [x] `viewer/static/index.html`: 席カードに発言の吹き出しを追加、フッタに
+      メッセージティッカー。Playwrightで実機確認（public: DM本文非表示・全体発言
+      表示、god: DM本文も表示、コンソールエラー0件）
+- [x] テスト36件新規（`test_dm_secrecy.py`・`test_messages.py`新規、
+      `test_viewer_secrecy.py`に6件追加）、全279件PASS
+- [x] 実課金トライアル3本（L6×6・20ターン、$0.093）で実測: **pass率0.9%
+      （中央値）、MATCH_RESOLVED 23件（中央値、Stage 0の19件から減っていない
+      ＝「喋ると殴れない」問題は発生せず）、発言6件（中央値）**。broadcastで
+      「全員に提案。カード12枚に対し残り19ターンでは全員生還不可能。同時多発
+      対戦をしないか」という具体的な協調の呼びかけが自発的に発生した。
+      DM・匿名通信は0件（20ターンでは全員が同じ危機に直面するため全体呼びかけが
+      優先された可能性。120ターンの本番で変化するか要観察）

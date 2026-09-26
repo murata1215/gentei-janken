@@ -394,6 +394,7 @@ function mountPanels(pids) {
           <div class="finance-detail god-only" hidden></div>
         </div>
       </div>
+      <div class="speech-bubble" hidden></div>
       <div class="match-slot sit-muted">—</div>
       <div class="last-event sit-muted">—</div>
       <div class="stats-row">
@@ -419,6 +420,7 @@ function mountPanels(pids) {
       matchSlot: el.querySelector(".match-slot"),
       lastEvent: el.querySelector(".last-event"),
       statsLeft: el.querySelector(".stats-left"),
+      bubble: el.querySelector(".speech-bubble"),
     };
   }
   // identityが公開されていれば、モデル名を表示に反映する（1回だけでよい）
@@ -617,6 +619,64 @@ function renderTurn(animate) {
   renderFinance(snap);
   renderExits(snap);
   renderRawLog(snap);
+  renderMessages(snap);
+}
+
+// =============================================================================
+// メッセージ（DM・全体発言・匿名通信、サイクル1.9）
+//
+// publicではDM_SENTにmessageキーが存在しない（サーバ側でキーごと削除済み）ため、
+// フロントは秘匿判定を一切行わない——サーバが落とした結果をそのまま表示するだけ。
+// これにより秘匿境界がフロントのバグで破れることがない（viewer/log_parser.py
+// のホワイトリストに一本化）。
+// =============================================================================
+function renderMessages(snap) {
+  const footer = document.getElementById("footer-log");
+  const msgs = (snap.delta && snap.delta.messages) || [];
+
+  for (const pid in panelRefs) {
+    const bubble = panelRefs[pid].bubble;
+    if (bubble) { bubble.hidden = true; bubble.textContent = ""; }
+  }
+
+  for (const m of msgs) {
+    if (m.event_type === "BROADCAST_SENT" && panelRefs[m.sender]) {
+      showBubble(panelRefs[m.sender], `📢 ${truncateText(m.message, 40)}`);
+    } else if (m.event_type === "DM_SENT" && panelRefs[m.sender]) {
+      const label = m.message ? `✉→${m.to}: ${truncateText(m.message, 30)}` : `✉→${m.to}（非公開）`;
+      showBubble(panelRefs[m.sender], label);
+    } else if (m.event_type === "ANONYMOUS_BROADCAST_SENT" && m.sender && panelRefs[m.sender]) {
+      // sender はgod viewでのみdataに存在する（public投影で自動的に落ちる）
+      showBubble(panelRefs[m.sender], `🎭 ${truncateText(m.message, 40)}`);
+    }
+  }
+
+  if (!msgs.length) { footer.innerHTML = ""; return; }
+  footer.innerHTML = msgs.map(m => {
+    if (m.event_type === "DM_SENT") {
+      const body = m.message ? escapeHtml(m.message) : "(非公開のDM)";
+      return `<div class="msg"><span class="sender">${escapeHtml(m.sender)}→${escapeHtml(m.to)}</span> ${body}</div>`;
+    }
+    if (m.event_type === "BROADCAST_SENT") {
+      return `<div class="msg"><span class="sender">${escapeHtml(m.sender)} 全体</span> ${escapeHtml(m.message)}</div>`;
+    }
+    if (m.event_type === "ANONYMOUS_BROADCAST_SENT") {
+      const who = m.sender ? `匿名(${escapeHtml(m.sender)})` : "匿名";
+      return `<div class="msg"><span class="sender">${who}</span> ${escapeHtml(m.message)}</div>`;
+    }
+    return "";
+  }).join("");
+}
+
+function truncateText(s, n) {
+  if (typeof s !== "string") return "";
+  return s.length > n ? s.slice(0, n) + "…" : s;
+}
+
+function showBubble(ref, text) {
+  if (!ref.bubble) return;
+  ref.bubble.textContent = text;
+  ref.bubble.hidden = false;
 }
 
 function renderBoard(b) {

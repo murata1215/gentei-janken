@@ -628,3 +628,10 @@ body > .god-banner { margin: 0; border-radius: 0; text-align: center; }
 .spark-scissors { fill: none; stroke: #4fc3f7; stroke-width: 1.5; }
 .spark-paper { fill: none; stroke: #ffd479; stroke-width: 1.5; }
 .spark-cursor { stroke: var(--text-muted); stroke-width: 1; stroke-dasharray: 2 2; }
+
+/* 発言の吹き出し（サイクル1.9: DM・全体発言・匿名通信） */
+.speech-bubble {
+  font-size: 11.5px; background: var(--input-bg); border: 1px solid var(--border-accent);
+  border-radius: 8px; padding: 3px 8px; margin: 4px 0; color: var(--text-content);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}

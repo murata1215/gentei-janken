@@ -129,3 +129,63 @@ def test_sanitize_reason_unit_noop_without_reason_key():
 def test_all_whitelisted_codes_are_plain_strings_without_ids(code):
     """ホワイトリストの値自体がplayer_id/card_idを含む動的文字列でないことを保証する"""
     assert not re.search(r"P\d\d", code)
+
+
+# --- サイクル1.9: DM・全体発言・匿名通信のpublic投影テスト ---
+
+_MESSAGE_EVENTS = [
+    {"event_type": "GAME_START", "round_num": 0,
+     "data": {"num_players": 2, "total_turns": 10, "initial_loans": {"P01": 1_000_000, "P02": 1_000_000}}},
+    {"event_type": "DM_SENT", "round_num": 1,
+     "data": {"sender": "P01", "to": "P02", "message": "SECRET_DM_BODY_7f3a", "turn": 1}},
+    {"event_type": "BROADCAST_SENT", "round_num": 2,
+     "data": {"sender": "P01", "message": "PUBLIC_BROADCAST_BODY", "turn": 2}},
+    {"event_type": "ANONYMOUS_BROADCAST_SENT", "round_num": 3,
+     "data": {"message": "PUBLIC_ANON_BODY", "turn": 3, "sender": "P02"}},
+    {"event_type": "DM_REJECTED", "round_num": 4, "data": {"player_id": "P01", "reason": "empty_message"}},
+]
+
+
+def test_dm_sent_public_omits_message_body(client, tmp_path):
+    _write_events(tmp_path, "g1", _MESSAGE_EVENTS)
+    resp = client.get("/api/games/g1/turns?view=public")
+    assert resp.status_code == 200
+    assert "SECRET_DM_BODY_7f3a" not in resp.text
+
+
+def test_dm_sent_public_keeps_sender_and_to(client, tmp_path):
+    _write_events(tmp_path, "g1", _MESSAGE_EVENTS)
+    body = client.get("/api/games/g1/turns?view=public").json()
+    dm = next(ev for turn in body for ev in turn["events"] if ev["event_type"] == "DM_SENT")
+    assert dm["data"] == {"sender": "P01", "to": "P02", "turn": 1}
+
+
+def test_dm_sent_god_view_shows_message_body(client, tmp_path):
+    _write_events(tmp_path, "g1", _MESSAGE_EVENTS)
+    resp = client.get("/api/games/g1/turns?view=god", headers={"X-Viewer-God-Token": "secret-god-token"})
+    assert "SECRET_DM_BODY_7f3a" in resp.text
+
+
+def test_broadcast_sent_public_shows_message_and_sender(client, tmp_path):
+    """全体発言は本文・発信者ともに公開情報（§8.2）"""
+    _write_events(tmp_path, "g1", _MESSAGE_EVENTS)
+    body = client.get("/api/games/g1/turns?view=public").json()
+    bc = next(ev for turn in body for ev in turn["events"] if ev["event_type"] == "BROADCAST_SENT")
+    assert bc["data"] == {"sender": "P01", "message": "PUBLIC_BROADCAST_BODY", "turn": 2}
+
+
+def test_anonymous_broadcast_public_shows_message_but_hides_sender(client, tmp_path):
+    """匿名通信は本文は公開・発信者は秘匿（§8.2）"""
+    _write_events(tmp_path, "g1", _MESSAGE_EVENTS)
+    body = client.get("/api/games/g1/turns?view=public").json()
+    anon = next(ev for turn in body for ev in turn["events"] if ev["event_type"] == "ANONYMOUS_BROADCAST_SENT")
+    assert anon["data"] == {"message": "PUBLIC_ANON_BODY", "turn": 3}
+    assert "sender" not in anon["data"]
+
+
+def test_anonymous_broadcast_god_view_reveals_sender(client, tmp_path):
+    _write_events(tmp_path, "g1", _MESSAGE_EVENTS)
+    resp = client.get("/api/games/g1/turns?view=god", headers={"X-Viewer-God-Token": "secret-god-token"})
+    body = resp.json()
+    anon = next(ev for turn in body for ev in turn["events"] if ev["event_type"] == "ANONYMOUS_BROADCAST_SENT")
+    assert anon["data"]["sender"] == "P02"

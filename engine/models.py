@@ -217,6 +217,36 @@ class Bounty(BaseModel):
 
 
 # =============================================================================
+# 通信（§5.2/§7.5）
+# =============================================================================
+
+MessageType = Literal["dm", "broadcast", "anonymous_broadcast"]
+
+
+class Message(BaseModel):
+    """
+    通信1件（§5.2）。DM本文・匿名通信の発信者は§8.2秘匿情報
+
+    保管はこのpydanticモデルで型安全に行い、可視化（誰に何を見せるか）は
+    engine/messages.py::visible_messages() が model_dump() 後にキー単位で
+    投影する（rules/project.md「DM本文はキーごと削除」は可視状態を構築する
+    関数への規定であって保管型の規定ではない）。
+
+    匿名通信の実送信者はこのモデルには一切乗らない（senderは常にNone）。
+    実送信者はGame._anon_message_owners（message_id -> player_id）に
+    別途保持し、god視点の投影でのみ参照する。
+    """
+    message_id: str
+    sender: str | None
+    """匿名通信は常にNone（実送信者はGame._anon_message_owners側で管理）"""
+    type: MessageType
+    to: str | None = None
+    """dmのみ使用（宛先player_id）"""
+    message: str
+    turn: int
+
+
+# =============================================================================
 # アクション（§5.2）
 # =============================================================================
 

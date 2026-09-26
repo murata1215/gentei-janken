@@ -138,6 +138,33 @@ def build_opponents_section(visible_state: dict) -> str:
     return "## 場に残っている他プレイヤー（対戦・送金の相手先IDに使える）\n" + ", ".join(alive)
 
 
+def build_messages_section(visible_state: dict) -> str:
+    """
+    届いているメッセージを表示する（§5.2 DM・全体発言・匿名通信）
+
+    engine/game.py::_build_visible_state の messages は既に本人視点で投影済み
+    （§8.2の秘匿境界はサーバ側engine/messages.py::visible_messages()で確定済み。
+    ここでは一切判定しない——秘匿ロジックの二重管理を避ける）。
+    """
+    messages = visible_state.get("messages")
+    if not messages:
+        return "## 届いているメッセージ\n(なし)"
+    lines = ["## 届いているメッセージ（DM/全体発言/匿名通信。古い順）"]
+    for m in messages:
+        prefix = f"[T{m['turn']}]"
+        if m["type"] == "dm":
+            if m.get("redacted"):
+                lines.append(f"{prefix} [{m['sender']}→{m['to']}]（非公開のDM。あなたは当事者ではない）")
+            else:
+                lines.append(f"{prefix} [{m['sender']}→{m['to']}] {m['message']}")
+        elif m["type"] == "broadcast":
+            lines.append(f"{prefix} [{m['sender']} 全体] {m['message']}")
+        elif m["type"] == "anonymous_broadcast":
+            mine = "・あなたが送信" if m.get("is_mine") else ""
+            lines.append(f"{prefix} [匿名{mine}] {m['message']}")
+    return "\n".join(lines)
+
+
 def build_board_section(board: dict[str, int]) -> str:
     """残数掲示板セクションを構築する（§8.1）"""
     return (
@@ -158,6 +185,9 @@ ACTION_DESCRIPTIONS_JA: dict[str, str] = {
     "match_decline": "届いている対戦申込を拒否する",
     "match_withdraw": "自分が出した対戦申込を取り下げる（受諾前のみ）",
     "exit": "退出する（§6.1の条件を満たさない場合は不成立になるだけで脱落しない）",
+    "dm": "特定の相手に1対1でメッセージを送る（対戦の事前調整・取引の打診等。本文は当事者以外に見えない）",
+    "broadcast": "全員に公開でメッセージを送る（同盟の呼びかけ・裏切りの告発等。発信者は公開される）",
+    "anonymous_broadcast": "発信者を伏せて全員にメッセージを送る（有料・1ターン上限あり。具体額は本セクション末尾に明記）",
 }
 """IMPLEMENTED_ACTION_TYPES に対応する日本語の短い説明"""
 
@@ -170,14 +200,19 @@ _ACTION_EXAMPLE = {
 """build_action_prompt() が末尾に添える具体例（match_offer）"""
 
 
-def build_action_prompt() -> str:
+def build_action_prompt(config: GameConfig | None = None) -> str:
     """
     行動選択の指示セクションを構築する（§5.2）
 
     IMPLEMENTED_ACTION_TYPES（本サイクルでengineが実処理するアクション種）のみを
-    提示する。未実装（dm/trade_*/contract_*/bounty_*等）は提示しない
+    提示する。未実装（trade_*/contract_*/bounty_*等）は提示しない
     ——選ばせても ACTION_UNHANDLED で捨てられ、課金とターンの無駄になるため。
+
+    configはanonymous_broadcastの料金・上限をハードコードせず表示するために使う
+    （rules/project.md「設定の単一ソース化ルール」）。省略時（既存テスト等）は
+    GameConfig()の既定値を使う。
     """
+    cfg = config or GameConfig()
     lines = [
         "## 行動選択",
         "次のいずれか1つを選び、JSONオブジェクトのみで応答してください"
@@ -188,6 +223,10 @@ def build_action_prompt() -> str:
         fields = REQUIRED_FIELDS_BY_ACTION_TYPE[action_type]
         field_note = f"必須フィールド: {', '.join(fields)}" if fields else "他のフィールドは不要"
         lines.append(f'- "{action_type}": {ACTION_DESCRIPTIONS_JA[action_type]}（{field_note}）')
+    lines.append(
+        f"（anonymous_broadcastは{cfg.anonymous_message_fee}円かかり、"
+        f"1ターンに{cfg.anonymous_message_limit_per_turn}通まで。発信者は誰にも分からない）"
+    )
     lines.append("例（対戦の申込）: " + json.dumps(_ACTION_EXAMPLE, ensure_ascii=False))
     lines.append(
         '任意で"memory"キーに次ターンの自分への申し送りを書いてよい（相手の傾向・'
